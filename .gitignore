@@ -1,0 +1,19 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+node_modules/
+dist/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+
+# --- Proprietary core: kept LOCAL (the app still runs), excluded from the
+# public repo so the secret-sauce logic isn't handed out. Backup in .private/ ---
+.private/
+backend/services/arb_taker.py
+backend/services/market_matcher.py
+backend/services/pf_websocket.py
+frontend/src/lib/arbMath.ts
