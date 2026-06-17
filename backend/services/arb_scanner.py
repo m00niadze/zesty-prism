@@ -113,11 +113,12 @@ class ArbScanner:
         pf_fallback = self._settings.PF_FALLBACK_FEE_BPS / 10000.0
 
         async def _pf_book(pf_market_id: str) -> dict:
-            """{'yes_asks':[...], 'yes_bids':[...]} from the WS if available, else REST."""
+            """{'yes_asks':[...], 'yes_bids':[...], 'ts': ms} from the WS if
+            available, else REST (REST has no ts → treated as freshly fetched)."""
             if pf_ws is not None:
                 b = pf_ws.get_book(pf_market_id)
                 if b is not None:
-                    return {"yes_asks": b["asks"], "yes_bids": b["bids"]}
+                    return {"yes_asks": b["asks"], "yes_bids": b["bids"], "ts": b.get("ts")}
             return await pf_client.get_order_book(pf_market_id)
 
         async with self._db.execute(
@@ -140,10 +141,20 @@ class ArbScanner:
         # Stage 2 — walk full order books for candidates only
         sem = asyncio.Semaphore(20)
 
+        book_max_age_ms = self._settings.BOOK_MAX_AGE_SECONDS * 1000
+
         async def evaluate(mid: int, strat: str, poly_rate: float, pf_rate: float):
             m = meta[mid]
             async with sem:
                 ob = await _pf_book(m["pf_market_id"])
+                # Stale-book guard: a PF book that hasn't changed in a long time
+                # is a dead/illiquid cross (a resting order nobody takes), not a
+                # tradeable arb — drop it so it doesn't stay live or alert.
+                ts = ob.get("ts")
+                if ts is not None:
+                    age_ms = datetime.now(timezone.utc).timestamp() * 1000 - ts
+                    if age_ms > book_max_age_ms:
+                        return None
                 if strat == YES_POLY_NO_PF:
                     poly_l = await poly_client.get_order_book(m["poly_yes_token_id"])
                     pf_l = PredictFunClient.no_asks_from_bids(ob["yes_bids"])
@@ -182,6 +193,7 @@ class ArbScanner:
                 meets = (
                     opp.net_pct_top >= s["min_arb_pct"]
                     and opp.max_profit_usd >= s["min_profit_usd"]
+                    and opp.max_wager_usd >= s["min_wager_usd"]
                 )
                 last = self._last_alert.get(key)
                 if meets and (last is None or now - last > self.ALERT_COOLDOWN):
@@ -248,4 +260,5 @@ class ArbScanner:
             "notional_usd": float(raw.get("notional_usd", self._settings.NOTIONAL_USD)),
             "min_arb_pct": float(raw.get("min_arb_pct", self._settings.MIN_ARB_PCT)),
             "min_profit_usd": float(raw.get("min_profit_usd", self._settings.MIN_PROFIT_USD)),
+            "min_wager_usd": float(raw.get("min_wager_usd", self._settings.MIN_WAGER_USD)),
         }

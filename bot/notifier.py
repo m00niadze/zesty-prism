@@ -12,7 +12,7 @@ from formatters import fmt_arb_alert
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "/data/zesty.db"
+DB_PATH = os.getenv("DATABASE_PATH", "/data/zesty.db")
 
 
 class ArbNotifier:

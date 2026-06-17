@@ -4,7 +4,13 @@ import os
 
 from dotenv import load_dotenv
 from telegram import BotCommand, MenuButtonCommands
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 import handlers
 from notifier import ArbNotifier
@@ -44,13 +50,18 @@ async def main() -> None:
     app.add_handler(CommandHandler("settings",      handlers.cmd_settings))
     app.add_handler(CommandHandler("set_min_pct",   handlers.cmd_set_min_pct))
     app.add_handler(CommandHandler("set_min_usd",   handlers.cmd_set_min_usd))
+    app.add_handler(CommandHandler("set_min_wager", handlers.cmd_set_min_wager))
     app.add_handler(CommandHandler("set_notional",  handlers.cmd_set_notional))
     app.add_handler(CommandHandler("add_wallet",    handlers.cmd_add_wallet))
     app.add_handler(CommandHandler("remove_wallet", handlers.cmd_remove_wallet))
     app.add_handler(CommandHandler("notify",        handlers.cmd_notify_toggle))
+    app.add_handler(CommandHandler("cancel",        handlers.cmd_cancel))
 
     # Inline keyboard buttons
     app.add_handler(CallbackQueryHandler(handlers.callback_handler))
+
+    # Free-typed value after tapping a ✏️ Custom button in Settings.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_text))
 
     # Log any handler exceptions instead of silently swallowing them
     app.add_error_handler(_error_handler)

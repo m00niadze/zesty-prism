@@ -1,6 +1,8 @@
+import os
+
 import aiosqlite
 
-DB_PATH = "/data/zesty.db"
+DB_PATH = os.getenv("DATABASE_PATH", "/data/zesty.db")
 
 
 async def get_setting(db: aiosqlite.Connection, key: str, default: str | None = None) -> str | None:

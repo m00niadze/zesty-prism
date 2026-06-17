@@ -23,8 +23,11 @@ class Settings(BaseSettings):
     WALLET_ADDRESSES: str = ""
 
     MIN_MATCH_SCORE: float = 82.0
-    MIN_ARB_PCT: float = 0.5
-    MIN_PROFIT_USD: float = 2.0
+    MIN_ARB_PCT: float = 1.0
+    MIN_PROFIT_USD: float = 10.0
+    # Minimum executable book depth (Max profitable size in $) before an arb is
+    # worth alerting on — thin few-dollar crosses vanish before you can trade.
+    MIN_WAGER_USD: float = 30.0
     NOTIONAL_USD: float = 100.0
 
     # Taker fees. Polymarket: per-market category rate (crypto 7%, sports 3%,
@@ -43,6 +46,10 @@ class Settings(BaseSettings):
     OPPORTUNITY_EXPIRY_SECONDS: int = 10
     PRICE_STALENESS_SECONDS: int = 30
     TAKER_REFRESH_SECONDS: int = 3
+    # If a Predict.fun order book hasn't changed in this long, the "arb" is a
+    # dead/illiquid cross (a stale resting order nobody takes), not something you
+    # can actually trade — don't keep it live or alert on it.
+    BOOK_MAX_AGE_SECONDS: int = 90
 
     @property
     def wallet_list(self) -> list[str]:

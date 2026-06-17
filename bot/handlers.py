@@ -17,8 +17,16 @@ from formatters import (
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "/data/zesty.db"
+DB_PATH = os.getenv("DATABASE_PATH", "/data/zesty.db")
 SITE_BASE_URL = os.getenv("SITE_BASE_URL", "")
+
+# Settings that the ✏️ Custom buttons let the user type a value for.
+_SETTING_LABELS = {
+    "min_arb_pct": "Min arb %",
+    "min_profit_usd": "Min profit ($)",
+    "min_wager_usd": "Min depth ($)",
+    "notional_usd": "Notional / calc size ($)",
+}
 
 
 async def _db() -> aiosqlite.Connection:
@@ -59,13 +67,16 @@ def _settings_keyboard(s: dict) -> InlineKeyboardMarkup:
     notify_label = "🔔 Alerts ON" if s.get("tg_notify_enabled", "1") == "1" else "🔕 Alerts OFF"
     cur_pct = s.get("min_arb_pct", "3.0")
     cur_usd = s.get("min_profit_usd", "5.0")
+    cur_wager = s.get("min_wager_usd", "30")
+    cur_notional = s.get("notional_usd", "100")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("─── Min arb % ───", callback_data="noop")],
+        [InlineKeyboardButton("─── Min arb %  (✏️ = type your own) ───", callback_data="noop")],
         [
             _opt("1%", 1.0, cur_pct, "set_min_pct_"),
             _opt("2%", 2.0, cur_pct, "set_min_pct_"),
             _opt("3%", 3.0, cur_pct, "set_min_pct_"),
             _opt("5%", 5.0, cur_pct, "set_min_pct_"),
+            InlineKeyboardButton("✏️", callback_data="custom_min_arb_pct"),
         ],
         [InlineKeyboardButton("─── Min profit USD ───", callback_data="noop")],
         [
@@ -73,7 +84,17 @@ def _settings_keyboard(s: dict) -> InlineKeyboardMarkup:
             _opt("$5",  5.0,  cur_usd, "set_min_usd_"),
             _opt("$10", 10.0, cur_usd, "set_min_usd_"),
             _opt("$25", 25.0, cur_usd, "set_min_usd_"),
+            InlineKeyboardButton("✏️", callback_data="custom_min_profit_usd"),
         ],
+        [InlineKeyboardButton("─── Min depth USD ───", callback_data="noop")],
+        [
+            _opt("$10",  10.0,  cur_wager, "set_min_wager_"),
+            _opt("$30",  30.0,  cur_wager, "set_min_wager_"),
+            _opt("$100", 100.0, cur_wager, "set_min_wager_"),
+            _opt("$500", 500.0, cur_wager, "set_min_wager_"),
+            InlineKeyboardButton("✏️", callback_data="custom_min_wager_usd"),
+        ],
+        [InlineKeyboardButton(f"✏️ Notional (calc size): ${cur_notional}", callback_data="custom_notional_usd")],
         [InlineKeyboardButton(notify_label, callback_data="toggle_notify")],
         [InlineKeyboardButton("🏠 Menu", callback_data="menu")],
     ])
@@ -82,15 +103,17 @@ def _settings_keyboard(s: dict) -> InlineKeyboardMarkup:
 async def _fetch_arb(db: aiosqlite.Connection) -> str:
     min_pct = float(await get_setting(db, "min_arb_pct", "3.0") or 3.0)
     min_usd = float(await get_setting(db, "min_profit_usd", "5.0") or 5.0)
+    min_wager = float(await get_setting(db, "min_wager_usd", "30") or 30)
     async with db.execute(
         """SELECT a.*, m.poly_title, m.pf_title, m.poly_category,
                   m.poly_slug, m.pf_category_slug
            FROM arb_opportunities a
            JOIN matched_markets m ON a.matched_market_id = m.id
            WHERE a.is_live = 1 AND a.net_pct_top >= ? AND a.max_profit_usd >= ?
+                 AND a.max_wager_usd >= ?
            ORDER BY a.max_profit_usd DESC
            LIMIT 10""",
-        (min_pct, min_usd),
+        (min_pct, min_usd, min_wager),
     ) as cur:
         rows = await cur.fetchall()
     return fmt_arb_list([dict(r) for r in rows], min_pct, min_usd, SITE_BASE_URL)
@@ -238,6 +261,55 @@ async def cmd_set_notional(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("Invalid value. Example: /set_notional 100")
 
 
+async def cmd_set_min_wager(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Usage: /set_min_wager 30")
+        return
+    try:
+        val = float(context.args[0])
+        db = await _db()
+        await set_setting(db, "min_wager_usd", str(val))
+        await db.close()
+        await update.message.reply_text(f"Min depth set to ${val}", reply_markup=_back_button())
+    except ValueError:
+        await update.message.reply_text("Invalid value. Example: /set_min_wager 30")
+
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.user_data.pop("awaiting_setting", None):
+        await update.message.reply_text("Cancelled.", reply_markup=_main_menu_keyboard())
+    else:
+        await update.message.reply_text("Nothing to change right now.")
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Catch a typed value after the user tapped a ✏️ Custom button. Ignores
+    any other plain text (so it doesn't interfere with normal use)."""
+    key = context.user_data.get("awaiting_setting")
+    if not key:
+        return
+    raw = (update.message.text or "").strip().lstrip("$").rstrip("%").replace(",", ".").strip()
+    try:
+        val = float(raw)
+        if val < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ Please send a positive number, e.g. 100 (or /cancel).")
+        return
+    context.user_data.pop("awaiting_setting", None)
+    db = await _db()
+    try:
+        await set_setting(db, key, str(val))
+        s = await get_all_settings(db)
+    finally:
+        await db.close()
+    label = _SETTING_LABELS.get(key, key)
+    await update.message.reply_text(
+        f"✅ <b>{label}</b> set to <code>{val:g}</code>.\n\n" + fmt_settings(s),
+        parse_mode="HTML", reply_markup=_settings_keyboard(s),
+    )
+
+
 async def cmd_add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text("Usage: /add_wallet 0xYourAddress")
@@ -336,6 +408,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             s = await get_all_settings(db)
             await query.edit_message_text(fmt_settings(s), parse_mode="HTML",
                                           reply_markup=_settings_keyboard(s))
+
+        elif data.startswith("set_min_wager_"):
+            val = data.split("_")[-1]
+            await set_setting(db, "min_wager_usd", val)
+            s = await get_all_settings(db)
+            await query.edit_message_text(fmt_settings(s), parse_mode="HTML",
+                                          reply_markup=_settings_keyboard(s))
+
+        elif data.startswith("custom_"):
+            # User tapped ✏️ — remember which setting and wait for them to type a number.
+            key = data[len("custom_"):]
+            context.user_data["awaiting_setting"] = key
+            label = _SETTING_LABELS.get(key, key)
+            await query.edit_message_text(
+                f"✏️ Send the new value for <b>{label}</b> as a plain number "
+                f"(e.g. <code>100</code> or <code>2.5</code>).\nType /cancel to abort.",
+                parse_mode="HTML", reply_markup=_back_button())
 
         elif data == "toggle_notify":
             cur_val = await get_setting(db, "tg_notify_enabled", "1")
