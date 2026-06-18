@@ -37,7 +37,11 @@ class Settings(BaseSettings):
     # Predict.fun: flat % of cost from its API feeRateBps, falling back to this.
     PF_FALLBACK_FEE_BPS: float = 200.0
 
-    POLL_INTERVAL_POLY_SECONDS: int = 3
+    # Poll Polymarket prices every 10s (not 3s): the full-market price sweep is
+    # the heaviest Polymarket load and pulling it every 3s gets the backend
+    # rate-limited (empty books). 10s is well inside PRICE_STALENESS_SECONDS, so
+    # the taker scan (still every 3s, on cached prices/books) stays responsive.
+    POLL_INTERVAL_POLY_SECONDS: int = 10
     # Re-discover/re-match all markets often so brand-new markets (and their arb
     # windows) are caught fast. The full PF fetch is sequential (one stream), so
     # frequent runs add little rate-limit load — mostly just time.
@@ -46,10 +50,12 @@ class Settings(BaseSettings):
     OPPORTUNITY_EXPIRY_SECONDS: int = 10
     PRICE_STALENESS_SECONDS: int = 30
     TAKER_REFRESH_SECONDS: int = 3
-    # If a Predict.fun order book hasn't changed in this long, the "arb" is a
-    # dead/illiquid cross (a stale resting order nobody takes), not something you
-    # can actually trade — don't keep it live or alert on it.
-    BOOK_MAX_AGE_SECONDS: int = 90
+    # Stage 2 walks REST order books (Predict.fun + Polymarket) for each
+    # candidate. Both platforms rate-limit heavy polling, so: (a) cap how many
+    # candidates we walk per scan (live arbs always re-walked; rest sampled), and
+    # (b) cache each book briefly so we don't re-fetch the same market every scan.
+    MAX_TAKER_EVAL: int = 80
+    BOOK_CACHE_TTL_SECONDS: float = 8.0
 
     @property
     def wallet_list(self) -> list[str]:

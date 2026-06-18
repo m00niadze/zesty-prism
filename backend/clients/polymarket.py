@@ -111,6 +111,36 @@ class PolymarketClient:
         logger.info("Polymarket: fetched %d markets by conditionId (from %d ids)", len(out), len(unique))
         return out
 
+    async def get_book(self, token_id: str) -> dict[str, list[tuple[float, float]]]:
+        """Full order book for a token: {"asks": ascending, "bids": descending}.
+        Asks are for buying; bids are for selling (used by the exit math)."""
+        async with self._sem:
+            try:
+                async with self._session.get(
+                    f"{self._clob}/book", params={"token_id": token_id}
+                ) as r:
+                    if r.status == 404:
+                        return {"asks": [], "bids": []}
+                    r.raise_for_status()
+                    data = await r.json()
+            except Exception as e:
+                logger.debug("get_book(%s) error: %s", token_id[:8], e)
+                return {"asks": [], "bids": []}
+
+        def _clean(rows, ascending: bool) -> list[tuple[float, float]]:
+            out: list[tuple[float, float]] = []
+            for a in rows or []:
+                try:
+                    price, size = float(a["price"]), float(a["size"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if size > 0 and 0.0 < price < 1.0:
+                    out.append((price, size))
+            out.sort(key=lambda lv: lv[0], reverse=not ascending)
+            return out
+
+        return {"asks": _clean(data.get("asks"), True), "bids": _clean(data.get("bids"), False)}
+
     async def get_midprice(self, token_id: str) -> float | None:
         """Get best ask price for a CLOB token (what you pay to buy)."""
         async with self._sem:
@@ -197,6 +227,46 @@ class PolymarketClient:
                 levels.append((price, size))
         levels.sort(key=lambda lv: lv[0])
         return levels
+
+    async def get_books_batch(self, token_ids: list[str]) -> dict[str, list[tuple[float, float]]]:
+        """Ask ladders for MANY tokens at once via the CLOB POST /books endpoint.
+        Returns {token_id: [(price, size), ...] ascending}. One batched request
+        replaces dozens of per-token GET /book calls, which get rate-limited to
+        empty books at scale. Tokens with no/closed book are simply absent."""
+        out: dict[str, list[tuple[float, float]]] = {}
+        chunk = 100
+        unique = [t for t in dict.fromkeys(token_ids) if t]
+
+        async def _one(batch: list[str]) -> None:
+            body = [{"token_id": t} for t in batch]
+            async with self._sem:
+                try:
+                    async with self._session.post(f"{self._clob}/books", json=body) as r:
+                        r.raise_for_status()
+                        data = await r.json()
+                except Exception as e:
+                    logger.debug("get_books_batch chunk error: %s", e)
+                    return
+            for book in data or []:
+                tid = book.get("asset_id")
+                if not tid:
+                    continue
+                levels: list[tuple[float, float]] = []
+                for a in book.get("asks") or []:
+                    try:
+                        price = float(a["price"])
+                        size = float(a["size"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if size > 0 and 0.0 < price < 1.0:
+                        levels.append((price, size))
+                levels.sort(key=lambda lv: lv[0])
+                out[tid] = levels
+
+        await asyncio.gather(
+            *(_one(unique[i:i + chunk]) for i in range(0, len(unique), chunk))
+        )
+        return out
 
     async def get_clob_market_info(self, condition_id: str) -> dict[str, Any] | None:
         """Fetch market fee info: fd.r = feeRate, fd.e = exponent, fd.to = takerOnly."""

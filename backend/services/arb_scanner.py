@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -85,6 +87,10 @@ class ArbScanner:
         self._cache = price_cache
         self._settings = settings
         self._queue = alert_queue
+        # Short-TTL order-book cache so we don't re-fetch the same market's books
+        # every 3s — heavy book polling gets rate-limited (empty books). Keyed by
+        # ("poly"|"pf", id) → (monotonic_ts, book).
+        self._book_cache: dict[tuple[str, str], tuple[float, object]] = {}
         # currently-live windows: (matched_market_id, strategy) → db id
         self._live: dict[tuple[int, str], int] = {}
         # last time we alerted each window — used for a cooldown so a flapping
@@ -111,15 +117,23 @@ class ArbScanner:
         fallback); Poly books are fetched on demand. Only genuinely
         taker-profitable arbs go live."""
         pf_fallback = self._settings.PF_FALLBACK_FEE_BPS / 10000.0
+        book_ttl = self._settings.BOOK_CACHE_TTL_SECONDS
+        now_mono = time.monotonic()
+        # Drop expired book-cache entries so it stays bounded.
+        self._book_cache = {k: v for k, v in self._book_cache.items() if now_mono - v[0] < book_ttl}
 
         async def _pf_book(pf_market_id: str) -> dict:
-            """{'yes_asks':[...], 'yes_bids':[...], 'ts': ms} from the WS if
-            available, else REST (REST has no ts → treated as freshly fetched)."""
-            if pf_ws is not None:
-                b = pf_ws.get_book(pf_market_id)
-                if b is not None:
-                    return {"yes_asks": b["asks"], "yes_bids": b["bids"], "ts": b.get("ts")}
-            return await pf_client.get_order_book(pf_market_id)
+            """Fresh-ish PF order book via REST, cached for BOOK_CACHE_TTL_SECONDS.
+            The WS only pushes on change, so its book freezes for quiet markets;
+            REST is accurate, and the cache keeps the request volume low enough to
+            avoid rate-limit (empty books)."""
+            key = ("pf", pf_market_id)
+            hit = self._book_cache.get(key)
+            if hit is not None and now_mono - hit[0] < book_ttl:
+                return hit[1]
+            book = await pf_client.get_order_book(pf_market_id)
+            self._book_cache[key] = (now_mono, book)
+            return book
 
         async with self._db.execute(
             "SELECT id, poly_yes_token_id, poly_no_token_id, pf_market_id "
@@ -127,42 +141,68 @@ class ArbScanner:
         ) as cur:
             meta = {r["id"]: r for r in await cur.fetchall()}
 
-        # Stage 1 — screen. Poly fee rate is per-market (its category), carried on
-        # the price cache; PF rate from its API with a fallback.
-        candidates: list[tuple[int, str, float, float]] = []  # (mid, strat, poly_rate, pf_rate)
-        for p in self._cache.get_all_fresh(self._settings.PRICE_STALENESS_SECONDS):
+        # Stage 1 — screen on cached best-asks, then keep only the strongest
+        # realistic crossings to walk in Stage 2. Stage 2 fetches fresh REST
+        # books (PF rate-limits heavy polling), so it must be bounded.
+        scored: list[tuple[float, int, str, float, float]] = []  # (combined, mid, strat, poly_rate, pf_rate)
+        fresh = self._cache.get_all_fresh(self._settings.PRICE_STALENESS_SECONDS)
+        for p in fresh:
             if p.matched_market_id not in meta:
                 continue
             poly_rate = p.poly_fee_rate
             pf_rate = p.pf_taker_fee_rate or pf_fallback
             for strat in screen(p.poly_yes, p.poly_no, p.pf_yes, p.pf_no, poly_rate, pf_rate):
-                candidates.append((p.matched_market_id, strat, poly_rate, pf_rate))
+                if strat == YES_POLY_NO_PF:
+                    combined = (p.poly_yes or 1.0) + (p.pf_no or 1.0)
+                else:
+                    combined = (p.poly_no or 1.0) + (p.pf_yes or 1.0)
+                # A combined cost < 0.85 (>15% gross) is almost always a stale or
+                # empty-book artifact, not a real arb — skip it so the limited
+                # Stage-2 budget goes to plausible crossings.
+                if combined < 0.85:
+                    continue
+                scored.append((combined, p.matched_market_id, strat, poly_rate, pf_rate))
+
+        # Build the eval set within the per-scan budget: ALWAYS re-walk
+        # currently-live windows (so they stay accurate and don't flicker), then
+        # fill the rest with a RANDOM sample of the other crossings. Sorting by
+        # edge only ever picks the biggest-looking crossings, which are
+        # stale-price artifacts that fail the walk; random sampling reliably
+        # surfaces the genuine (smaller-edge) arbs, and over successive scans
+        # covers everything.
+        all_cands = [(mid, strat, pr, fr) for _c, mid, strat, pr, fr in scored]
+        live_keys = set(self._live.keys())
+        prioritized = [c for c in all_cands if (c[0], c[1]) in live_keys]
+        others = [c for c in all_cands if (c[0], c[1]) not in live_keys]
+        random.shuffle(others)
+        candidates: list[tuple[int, str, float, float]] = (prioritized + others)[
+            : self._settings.MAX_TAKER_EVAL
+        ]
+
+        # Batch-fetch every candidate's Polymarket book in ONE request (POST
+        # /books). Per-token GET /book gets rate-limited to empty books at scale;
+        # batching keeps Polymarket happy. PF books stay per-candidate (cached).
+        poly_token_for = {
+            (mid, strat): (meta[mid]["poly_yes_token_id"] if strat == YES_POLY_NO_PF
+                           else meta[mid]["poly_no_token_id"])
+            for mid, strat, _pr, _fr in candidates
+        }
+        poly_books = await poly_client.get_books_batch(list(poly_token_for.values()))
 
         # Stage 2 — walk full order books for candidates only
         sem = asyncio.Semaphore(20)
 
-        book_max_age_ms = self._settings.BOOK_MAX_AGE_SECONDS * 1000
-
         async def evaluate(mid: int, strat: str, poly_rate: float, pf_rate: float):
             m = meta[mid]
+            poly_l = poly_books.get(poly_token_for[(mid, strat)]) or []
             async with sem:
                 ob = await _pf_book(m["pf_market_id"])
-                # Stale-book guard: a PF book that hasn't changed in a long time
-                # is a dead/illiquid cross (a resting order nobody takes), not a
-                # tradeable arb — drop it so it doesn't stay live or alert.
-                ts = ob.get("ts")
-                if ts is not None:
-                    age_ms = datetime.now(timezone.utc).timestamp() * 1000 - ts
-                    if age_ms > book_max_age_ms:
-                        return None
-                if strat == YES_POLY_NO_PF:
-                    poly_l = await poly_client.get_order_book(m["poly_yes_token_id"])
-                    pf_l = PredictFunClient.no_asks_from_bids(ob["yes_bids"])
-                    poly_side, pf_side = "YES", "NO"
-                else:
-                    poly_l = await poly_client.get_order_book(m["poly_no_token_id"])
-                    pf_l = ob["yes_asks"]
-                    poly_side, pf_side = "NO", "YES"
+            if strat == YES_POLY_NO_PF:
+                pf_l = PredictFunClient.no_asks_from_bids(ob["yes_bids"])
+                poly_side, pf_side = "YES", "NO"
+            else:
+                pf_l = ob["yes_asks"]
+                poly_side, pf_side = "NO", "YES"
             res = compute_max(poly_l, pf_l, poly_rate, pf_rate)
             if res is None or res.profit <= 0:
                 return None
