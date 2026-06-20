@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     # candidate. Both platforms rate-limit heavy polling, so: (a) cap how many
     # candidates we walk per scan (live arbs always re-walked; rest sampled), and
     # (b) cache each book briefly so we don't re-fetch the same market every scan.
-    MAX_TAKER_EVAL: int = 80
+    MAX_TAKER_EVAL: int = 250
     BOOK_CACHE_TTL_SECONDS: float = 8.0
 
     @property

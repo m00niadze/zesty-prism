@@ -4,6 +4,7 @@ import { PortfolioSummary, fetchPortfolioSummary } from "../api/client";
 const EMPTY: PortfolioSummary = {
   stats: { open_ev: 0, deployed: 0, max_payoff: 0, active_pairs: 0 },
   pairs: [],
+  closing: [],
   standalone: [],
 };
 

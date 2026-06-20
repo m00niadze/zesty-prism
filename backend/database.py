@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS positions (
     unrealized_pnl      REAL,
     cost_usd            REAL,
     source              TEXT    NOT NULL DEFAULT 'auto',
+    sold_proceeds       REAL,
+    sold_at             TEXT,
+    sold_shares         REAL    NOT NULL DEFAULT 0,
     status              TEXT    NOT NULL DEFAULT 'open',
     entry_at            TEXT,
     closed_at           TEXT,
@@ -95,6 +98,16 @@ CREATE TABLE IF NOT EXISTS pf_markets (
     title           TEXT NOT NULL,
     category_slug   TEXT NOT NULL DEFAULT '',
     updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS market_stats (
+    matched_market_id   INTEGER PRIMARY KEY REFERENCES matched_markets(id),
+    poly_volume         REAL,
+    poly_liquidity      REAL,
+    poly_spread         REAL,
+    pf_liquidity        REAL,
+    pf_spread           REAL,
+    updated_at          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pnl_records (
@@ -152,6 +165,9 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "positions": [
         ("cost_usd", "REAL"),
         ("source", "TEXT NOT NULL DEFAULT 'auto'"),
+        ("sold_proceeds", "REAL"),
+        ("sold_at", "TEXT"),
+        ("sold_shares", "REAL NOT NULL DEFAULT 0"),
     ],
 }
 

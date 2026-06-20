@@ -8,11 +8,16 @@ router = APIRouter(prefix="/pnl")
 @router.get("/summary", response_model=PnlSummaryOut)
 async def get_pnl_summary(request: Request):
     db = request.app.state.db
+    tracker = request.app.state.portfolio_tracker
 
-    async with db.execute(
-        "SELECT COALESCE(SUM(unrealized_pnl), 0) FROM positions WHERE status='open'"
-    ) as cur:
-        unrealized = (await cur.fetchone())[0]
+    # Unrealized PnL counts ONLY arbitrage positions (legs of a hedged pair) —
+    # standalone positions are ignored.
+    summary = await tracker.build_summary()
+    unrealized = 0.0
+    for pair in summary["pairs"]:
+        for leg in (pair["poly"], pair["pf"]):
+            if leg and leg.get("pnl") is not None:
+                unrealized += leg["pnl"]
 
     async with db.execute(
         "SELECT COALESCE(SUM(realized_pnl), 0), COALESCE(SUM(fees_paid), 0) FROM pnl_records"

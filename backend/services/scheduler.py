@@ -84,8 +84,9 @@ async def polymarket_poll_loop(state: AppState) -> None:
 
 
 _PF_POLL_SEMAPHORE: asyncio.Semaphore | None = None
-# The WebSocket is now the primary source of live PF prices; this REST sweep is
-# a slow fallback (covers any market the WS hasn't pushed + refreshes fee rates).
+# The WebSocket is the primary source of live PF prices; this REST sweep is a
+# slow fallback. Keep it light so it doesn't eat the Predict.fun rate budget the
+# Stage-2 taker book-walks need (heavy PF polling triggers 429s → empty books).
 _PF_POLL_CONCURRENCY = 20
 _PF_POLL_INTERVAL = 30
 
@@ -166,6 +167,28 @@ async def _fetch_pf_market(state: AppState, mid: int, pf_market_id: str):
     return None
 
 
+def _fnum(v):
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _pf_book_stats(state: "AppState", pf_market_id: str):
+    """(liquidity, spread) from the live PF WS book. liquidity = Σ price×size
+    over both sides; spread = best ask − best bid."""
+    if state.pf_ws is None:
+        return None, None
+    book = state.pf_ws.get_book(pf_market_id)
+    if not book:
+        return None, None
+    asks = book.get("asks") or []
+    bids = book.get("bids") or []
+    liq = sum(p * s for p, s in asks) + sum(p * s for p, s in bids)
+    spread = (asks[0][0] - bids[0][0]) if (asks and bids) else None
+    return (liq or None), spread
+
+
 async def market_sync_loop(state: AppState) -> None:
     """Re-match markets every MARKET_SYNC_INTERVAL_SECONDS."""
     settings = state.settings
@@ -203,9 +226,30 @@ async def market_sync_loop(state: AppState) -> None:
 
             # Build a quick lookup of pf_market_id → market data (prices already fetched)
             pf_by_id = {str(m["id"]): m for m in pf_markets}
+            poly_by_cond = {m.get("conditionId"): m for m in poly_markets if m.get("conditionId")}
 
             for m in active:
                 state.price_cache.register(m["id"], m["pf_market_id"], m["poly_fee_rate"])
+                # Market stats (volume / liquidity / spread) for the Details rankings.
+                pm = poly_by_cond.get(m["poly_condition_id"])
+                pf_liq, pf_spread = _pf_book_stats(state, m["pf_market_id"])
+                await state.db.execute(
+                    """INSERT INTO market_stats
+                       (matched_market_id, poly_volume, poly_liquidity, poly_spread,
+                        pf_liquidity, pf_spread, updated_at)
+                       VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(matched_market_id) DO UPDATE SET
+                         poly_volume=excluded.poly_volume, poly_liquidity=excluded.poly_liquidity,
+                         poly_spread=excluded.poly_spread, pf_liquidity=excluded.pf_liquidity,
+                         pf_spread=excluded.pf_spread, updated_at=excluded.updated_at""",
+                    (
+                        m["id"],
+                        _fnum(pm.get("volume")) if pm else None,
+                        (_fnum(pm.get("liquidityNum")) or _fnum(pm.get("liquidity"))) if pm else None,
+                        _fnum(pm.get("spread")) if pm else None,
+                        pf_liq, pf_spread, now,
+                    ),
+                )
                 # Seed prices from market sync data into both cache and DB
                 raw = pf_by_id.get(str(m["pf_market_id"]))
                 if raw:

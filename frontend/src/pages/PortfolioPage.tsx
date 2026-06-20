@@ -8,7 +8,9 @@ import {
   removeWallet,
 } from "../api/client";
 import { usePortfolioSummary } from "../hooks/usePortfolio";
-import ArbPairCard from "../components/ArbPairCard";
+import ArbPositionRow from "../components/ArbPositionRow";
+import PositionDetail from "../components/PositionDetail";
+import ClosingPairCard from "../components/ClosingPairCard";
 import AddPfPositionModal from "../components/AddPfPositionModal";
 
 const money = (n: number | null) => (n == null ? "—" : `$${n.toFixed(2)}`);
@@ -19,6 +21,7 @@ export default function PortfolioPage() {
   const [showWallets, setShowWallets] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedPairId, setSelectedPairId] = useState<number | null>(null);
 
   const loadWallets = () => fetchWallets().then((r) => setWallets(r.data.wallets));
   useEffect(() => { loadWallets(); }, []);
@@ -29,7 +32,7 @@ export default function PortfolioPage() {
     setTimeout(() => { reload(); setRefreshing(false); }, 4000);
   };
 
-  const { stats, pairs, standalone } = data;
+  const { stats, pairs, closing, standalone } = data;
   const nothing = wallets.length === 0 && pairs.length === 0 && standalone.length === 0;
 
   return (
@@ -58,7 +61,7 @@ export default function PortfolioPage() {
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard label="Open EV" value={money(stats.open_ev)} accent={stats.open_ev >= 0 ? "text-emerald-400" : "text-red-400"} />
         <StatCard label="Deployed" value={money(stats.deployed)} accent="text-white" />
-        <StatCard label="Max Payoff" value={money(stats.max_payoff)} accent="text-blue-400" />
+        <StatCard label="Payout" value={money(stats.max_payoff)} accent="text-blue-400" />
         <StatCard label="Active Pairs" value={String(stats.active_pairs)} accent="text-purple-400" />
       </div>
 
@@ -77,13 +80,69 @@ export default function PortfolioPage() {
         </div>
       )}
 
-      {pairs.length > 0 && (
+      {!nothing && (
         <section className="space-y-3">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-400">
             Arbitrage Positions ({pairs.length})
           </h2>
+          {pairs.length > 0 ? (
+            <>
+              <div className="overflow-x-auto rounded-xl border border-gray-800">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-900 text-left text-gray-400">
+                      <th className="px-4 py-2 font-medium">Est EV</th>
+                      <th className="px-4 py-2 font-medium">Market</th>
+                      <th className="px-4 py-2 font-medium">Shares</th>
+                      <th className="px-4 py-2 text-right font-medium">Bought At</th>
+                      <th className="px-4 py-2 text-right font-medium">Now (bid)</th>
+                      <th className="px-4 py-2 text-right font-medium">Paid</th>
+                      <th className="px-4 py-2 text-right font-medium">Ask P&L</th>
+                      <th className="px-4 py-2 text-right font-medium">Bid P&L</th>
+                      <th className="px-2 py-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pairs.map((p) => (
+                      <ArbPositionRow
+                        key={p.matched_market_id}
+                        pair={p}
+                        selected={selectedPairId === p.matched_market_id}
+                        onSelect={() => setSelectedPairId(selectedPairId === p.matched_market_id ? null : p.matched_market_id)}
+                        onRemoved={() => { setSelectedPairId(null); reload(); }}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {selectedPairId != null && (() => {
+                const sp = pairs.find((p) => p.matched_market_id === selectedPairId);
+                return sp ? (
+                  <PositionDetail
+                    matchedMarketId={selectedPairId}
+                    pfLegId={sp.pf.id}
+                    pfShares={sp.pf.shares}
+                    onClose={() => setSelectedPairId(null)}
+                    onChanged={reload}
+                  />
+                ) : null;
+              })()}
+            </>
+          ) : (
+            <div className="rounded-xl border border-dashed border-gray-800 bg-gray-900/40 px-4 py-8 text-center text-sm text-gray-500">
+              No arbitrage positions yet. When you hold <span className="text-gray-300">opposite sides of the same market on both platforms</span>, the pair shows up here with its locked profit.
+            </div>
+          )}
+        </section>
+      )}
+
+      {closing.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-500/80">
+            Closing Arbitrage ({closing.length})
+          </h2>
           <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-            {pairs.map((p) => <ArbPairCard key={p.matched_market_id} pair={p} />)}
+            {closing.map((c) => <ClosingPairCard key={c.matched_market_id} closing={c} onChanged={reload} />)}
           </div>
         </section>
       )}

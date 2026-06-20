@@ -11,6 +11,16 @@ export default function AddPfPositionModal({ onClose, onAdded }: Props) {
   const [results, setResults] = useState<PfMarket[]>([]);
   const [picked, setPicked] = useState<PfMarket | null>(null);
   const [side, setSide] = useState<"YES" | "NO">("YES");
+
+  // When you pick a market where you hold a Poly side, default to the OPPOSITE
+  // side here and pre-fill shares to match (that completes the hedge / arb).
+  const pick = (m: PfMarket) => {
+    setPicked(m);
+    if (m.holding_poly_side) {
+      setSide(m.holding_poly_side === "YES" ? "NO" : "YES");
+      if (m.holding_poly_shares) setShares(String(Math.round(m.holding_poly_shares)));
+    }
+  };
   const [shares, setShares] = useState("");
   const [cost, setCost] = useState("");
   const [saving, setSaving] = useState(false);
@@ -72,10 +82,19 @@ export default function AddPfPositionModal({ onClose, onAdded }: Props) {
               {results.map((m) => (
                 <button
                   key={m.id}
-                  onClick={() => setPicked(m)}
-                  className="block w-full truncate rounded px-3 py-2 text-left text-sm text-gray-300 hover:bg-gray-800"
+                  onClick={() => pick(m)}
+                  className="block w-full rounded px-3 py-2 text-left hover:bg-gray-800"
                 >
-                  {m.title}
+                  <div className="truncate text-sm text-gray-300">{m.title}</div>
+                  {m.holding_poly_side && (
+                    <div className="mt-0.5 text-xs">
+                      <span className="text-gray-500">Holding </span>
+                      <span className={m.holding_poly_side === "YES" ? "text-emerald-400" : "text-red-400"}>
+                        POLY {m.holding_poly_side}
+                      </span>
+                      <span className="text-gray-600"> → buy PF {m.holding_poly_side === "YES" ? "NO" : "YES"} to hedge</span>
+                    </div>
+                  )}
                 </button>
               ))}
               {query && results.length === 0 && (
@@ -89,6 +108,20 @@ export default function AddPfPositionModal({ onClose, onAdded }: Props) {
               {picked.title}
               <button onClick={() => setPicked(null)} className="ml-2 text-xs text-blue-400 hover:underline">change</button>
             </div>
+            {picked.holding_poly_side && (
+              <div className="rounded-lg border border-gray-800 bg-gray-900/60 px-3 py-2 text-xs">
+                <div className="mb-1 text-gray-500">Your Polymarket position on this market</div>
+                <div className="flex items-center gap-3">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                    picked.holding_poly_side === "YES" ? "bg-emerald-900 text-emerald-300" : "bg-red-900 text-red-300"
+                  }`}>{picked.holding_poly_side}</span>
+                  <span className="text-gray-300">{Math.round(picked.holding_poly_shares || 0).toLocaleString()} shares</span>
+                  <span className="text-gray-500">·</span>
+                  <span className="text-gray-300">${(picked.holding_poly_cost || 0).toFixed(2)} cost</span>
+                </div>
+                <div className="mt-1 text-gray-600">Buy PF {picked.holding_poly_side === "YES" ? "NO" : "YES"} (shares pre-filled to match) to hedge.</div>
+              </div>
+            )}
             <div className="flex gap-2">
               {(["YES", "NO"] as const).map((s) => (
                 <button

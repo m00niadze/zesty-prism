@@ -90,6 +90,39 @@ class PositionLegOut(BaseModel):
     current_value: float | None
     pnl: float | None
     source: str
+    status: str = "open"
+    sold_proceeds: float | None = None
+
+
+class ClosingLegOut(BaseModel):
+    id: int
+    platform: str
+    side: str
+    total_shares: float
+    sold_shares: float
+    sold_proceeds: float
+    open_shares: float
+    open_value: float
+
+
+class ClosingPairOut(BaseModel):
+    matched_market_id: int
+    title: str
+    legs: list[ClosingLegOut]
+    realized: float
+    open_value: float
+    paid: float
+    exit_now_pnl: float
+    # Hedge status of the REMAINING open shares (a partial sell on one leg leaves
+    # the open portions unequal → directional exposure on the difference).
+    hedged: bool = True
+    imbalance_shares: float = 0.0
+    hedge_action: str | None = None
+
+
+class MarkSoldIn(BaseModel):
+    sold_shares: float
+    proceeds: float
 
 
 class ArbPairOut(BaseModel):
@@ -100,6 +133,16 @@ class ArbPairOut(BaseModel):
     combined_cost: float
     max_payoff: float
     ev: float
+    # Hedge status: the two legs must hold EQUAL shares to be a full hedge.
+    # matched_shares = min(poly, pf); the excess on the larger leg is unhedged.
+    hedged: bool = True
+    matched_shares: float = 0.0
+    imbalance_shares: float = 0.0
+    long_platform: str | None = None   # leg holding the excess (unhedged) shares
+    long_side: str | None = None
+    short_platform: str | None = None  # leg to add shares to, to hedge
+    short_side: str | None = None
+    hedge_action: str | None = None    # human-readable fix
 
 
 class PortfolioStatsOut(BaseModel):
@@ -112,6 +155,7 @@ class PortfolioStatsOut(BaseModel):
 class PortfolioSummaryOut(BaseModel):
     stats: PortfolioStatsOut
     pairs: list[ArbPairOut]
+    closing: list[ClosingPairOut] = []
     standalone: list[PositionLegOut]
 
 
@@ -127,10 +171,87 @@ class PfMarketOut(BaseModel):
     id: str
     title: str
     category_slug: str
+    holding_poly_side: str | None = None  # "YES"/"NO" if user holds a Poly position here
+    holding_poly_shares: float | None = None
+    holding_poly_cost: float | None = None
 
 
 class WalletIn(BaseModel):
     address: str
+
+
+# ── Exit / sell a pair ────────────────────────────────────────────────────────
+
+class ExitLegOut(BaseModel):
+    kind: str          # "market" | "limit"
+    shares: float
+    avg_price: float
+    value: float
+    fee: float
+
+
+class ExitStrategyOut(BaseModel):
+    name: str
+    poly: ExitLegOut
+    pf: ExitLegOut
+    total_value: float
+    net: float
+    roi: float
+
+
+class DetailLegOut(BaseModel):
+    platform: str
+    title: str
+    side: str
+    shares: float
+    avg_price: float | None   # bought-at price (paid/shares)
+    paid: float
+    best_ask: float
+    best_bid: float
+    at_ask: float
+    at_bid: float
+    ask_pnl: float
+    bid_pnl: float
+
+
+class StatItemOut(BaseModel):
+    value: float | None = None
+    rank: int | None = None
+    total: int | None = None
+    label: str | None = None
+
+
+class PairStatsOut(BaseModel):
+    poly_volume: StatItemOut
+    poly_liquidity: StatItemOut
+    poly_spread: StatItemOut
+    pf_liquidity: StatItemOut
+    pf_spread: StatItemOut
+
+
+class OrderBookOut(BaseModel):
+    asks: list[tuple[float, float]]
+    bids: list[tuple[float, float]]
+
+
+class PairExitOut(BaseModel):
+    matched_market_id: int
+    title: str
+    poly_url: str
+    pf_url: str
+    est_ev: float
+    paid: float
+    bought_at: float       # combined ¢ (paid / matched shares)
+    now_bid: float         # combined ¢ (sell-now value / matched shares)
+    ask_pnl: float
+    bid_pnl: float
+    strategies: list[ExitStrategyOut]
+    best_index: int
+    legs: list[DetailLegOut]
+    combined: DetailLegOut
+    stats: PairStatsOut
+    poly_book: OrderBookOut
+    pf_book: OrderBookOut
 
 
 class PnlSummaryOut(BaseModel):

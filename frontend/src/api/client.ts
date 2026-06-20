@@ -90,6 +90,32 @@ export interface PositionLeg {
   current_value: number | null;
   pnl: number | null;
   source: string;
+  status: string;
+  sold_proceeds: number | null;
+}
+
+export interface ClosingLeg {
+  id: number;
+  platform: string;
+  side: string;
+  total_shares: number;
+  sold_shares: number;
+  sold_proceeds: number;
+  open_shares: number;
+  open_value: number;
+}
+
+export interface ClosingPair {
+  matched_market_id: number;
+  title: string;
+  legs: ClosingLeg[];
+  realized: number;
+  open_value: number;
+  paid: number;
+  exit_now_pnl: number;
+  hedged: boolean;
+  imbalance_shares: number;
+  hedge_action: string | null;
 }
 
 export interface ArbPair {
@@ -100,11 +126,20 @@ export interface ArbPair {
   combined_cost: number;
   max_payoff: number;
   ev: number;
+  hedged: boolean;
+  matched_shares: number;
+  imbalance_shares: number;
+  long_platform: string | null;
+  long_side: string | null;
+  short_platform: string | null;
+  short_side: string | null;
+  hedge_action: string | null;
 }
 
 export interface PortfolioSummary {
   stats: { open_ev: number; deployed: number; max_payoff: number; active_pairs: number };
   pairs: ArbPair[];
+  closing: ClosingPair[];
   standalone: PositionLeg[];
 }
 
@@ -112,10 +147,34 @@ export interface PfMarket {
   id: string;
   title: string;
   category_slug: string;
+  holding_poly_side: string | null;
+  holding_poly_shares: number | null;
+  holding_poly_cost: number | null;
+}
+
+export interface ExitLeg { kind: string; shares: number; avg_price: number; value: number; fee: number; }
+export interface ExitStrategy { name: string; poly: ExitLeg; pf: ExitLeg; total_value: number; net: number; roi: number; }
+export interface DetailLeg {
+  platform: string; title: string; side: string; shares: number; avg_price: number | null;
+  paid: number; best_ask: number; best_bid: number; at_ask: number; at_bid: number; ask_pnl: number; bid_pnl: number;
+}
+export interface StatItem { value: number | null; rank: number | null; total: number | null; label: string | null; }
+export interface PairStats {
+  poly_volume: StatItem; poly_liquidity: StatItem; poly_spread: StatItem; pf_liquidity: StatItem; pf_spread: StatItem;
+}
+export interface OrderBook { asks: [number, number][]; bids: [number, number][]; }
+export interface PairExit {
+  matched_market_id: number; title: string; poly_url: string; pf_url: string;
+  est_ev: number; paid: number; bought_at: number; now_bid: number; ask_pnl: number; bid_pnl: number;
+  strategies: ExitStrategy[]; best_index: number; legs: DetailLeg[]; combined: DetailLeg;
+  stats: PairStats; poly_book: OrderBook; pf_book: OrderBook;
 }
 
 export const fetchPortfolioSummary = () =>
   api.get<PortfolioSummary>("/portfolio/summary");
+
+export const fetchPairExit = (mmId: number) =>
+  api.get<PairExit>(`/portfolio/pairs/${mmId}/exit`);
 
 export const refreshPositions = () => api.post("/portfolio/refresh");
 
@@ -128,6 +187,11 @@ export const addManualPosition = (body: {
 }) => api.post("/portfolio/manual", body);
 
 export const deletePosition = (id: number) => api.delete(`/portfolio/positions/${id}`);
+
+export const markSold = (id: number, sold_shares: number, proceeds: number) =>
+  api.post(`/portfolio/positions/${id}/sold`, { sold_shares, proceeds });
+
+export const reopenPosition = (id: number) => api.post(`/portfolio/positions/${id}/reopen`);
 
 export const searchPfMarkets = (q: string) =>
   api.get<PfMarket[]>("/portfolio/pf-markets", { params: { q } });

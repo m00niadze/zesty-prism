@@ -113,19 +113,20 @@ class PolymarketClient:
 
     async def get_book(self, token_id: str) -> dict[str, list[tuple[float, float]]]:
         """Full order book for a token: {"asks": ascending, "bids": descending}.
-        Asks are for buying; bids are for selling (used by the exit math)."""
+        Uses the BATCH POST /books endpoint — the per-token GET /book gets
+        rate-limited to EMPTY (it intermittently returned no bids/asks for live
+        positions, showing $0 sell values). Asks = buy, bids = sell."""
         async with self._sem:
             try:
-                async with self._session.get(
-                    f"{self._clob}/book", params={"token_id": token_id}
+                async with self._session.post(
+                    f"{self._clob}/books", json=[{"token_id": token_id}]
                 ) as r:
-                    if r.status == 404:
-                        return {"asks": [], "bids": []}
                     r.raise_for_status()
-                    data = await r.json()
+                    payload = await r.json()
             except Exception as e:
                 logger.debug("get_book(%s) error: %s", token_id[:8], e)
                 return {"asks": [], "bids": []}
+        data = payload[0] if isinstance(payload, list) and payload else {}
 
         def _clean(rows, ascending: bool) -> list[tuple[float, float]]:
             out: list[tuple[float, float]] = []
@@ -201,32 +202,11 @@ class PolymarketClient:
         return out
 
     async def get_order_book(self, token_id: str) -> list[tuple[float, float]]:
-        """Full ask ladder for a CLOB token as a taker would consume it:
-        [(price, size), ...] sorted ASCENDING by price (cheapest fill first).
-        The API returns asks descending, so we re-sort."""
-        async with self._sem:
-            try:
-                async with self._session.get(
-                    f"{self._clob}/book", params={"token_id": token_id}
-                ) as r:
-                    if r.status == 404:
-                        return []
-                    r.raise_for_status()
-                    data = await r.json()
-            except Exception as e:
-                logger.debug("get_order_book(%s) error: %s", token_id[:8], e)
-                return []
-        levels: list[tuple[float, float]] = []
-        for a in data.get("asks") or []:
-            try:
-                price = float(a["price"])
-                size = float(a["size"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if size > 0 and 0.0 < price < 1.0:
-                levels.append((price, size))
-        levels.sort(key=lambda lv: lv[0])
-        return levels
+        """Ascending ask ladder for a CLOB token (cheapest fill first). Delegates
+        to get_book, which uses the reliable batched POST /books endpoint — the
+        per-token GET /book intermittently returns empty (it made the calculator
+        say 'not profitable / book moved' on arbs that were genuinely live)."""
+        return (await self.get_book(token_id))["asks"]
 
     async def get_books_batch(self, token_ids: list[str]) -> dict[str, list[tuple[float, float]]]:
         """Ask ladders for MANY tokens at once via the CLOB POST /books endpoint.

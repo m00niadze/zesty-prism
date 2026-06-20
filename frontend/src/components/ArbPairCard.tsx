@@ -1,4 +1,4 @@
-import { ArbPair, PositionLeg } from "../api/client";
+import { ArbPair, PositionLeg, deletePosition } from "../api/client";
 
 const money = (n: number | null) => (n == null ? "—" : `$${n.toFixed(2)}`);
 
@@ -31,16 +31,25 @@ function Row({ label, value, valueClass = "text-gray-200" }: { label: string; va
   );
 }
 
-export default function ArbPairCard({ pair }: { pair: ArbPair }) {
+export default function ArbPairCard({ pair, onRemoved }: { pair: ArbPair; onRemoved?: () => void }) {
+  const remove = async () => {
+    if (!confirm("Remove this arbitrage from your portfolio? (Deletes both legs.)")) return;
+    await Promise.all([deletePosition(pair.poly.id), deletePosition(pair.pf.id)]);
+    onRemoved?.();
+  };
   return (
     <div className="rounded-xl border border-gray-800 bg-gray-900 p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
+      <div className="mb-3 flex items-start justify-between gap-3">
         <h3 className="truncate text-sm font-semibold text-white" title={pair.title}>{pair.title}</h3>
-        <div className="shrink-0 text-right">
-          <div className="text-[10px] uppercase tracking-wide text-gray-500">Open EV</div>
-          <div className={`font-mono font-bold ${pair.ev >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-            {money(pair.ev)}
+        <div className="flex shrink-0 items-center gap-3">
+          <div className="text-right">
+            <div className="text-[10px] uppercase tracking-wide text-gray-500">Open EV</div>
+            <div className={`font-mono font-bold ${pair.ev >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {money(pair.ev)}
+            </div>
           </div>
+          <button onClick={remove} title="Remove arbitrage"
+            className="rounded p-1 text-gray-600 hover:bg-gray-800 hover:text-red-400">✕</button>
         </div>
       </div>
       <div className="flex flex-col gap-3 sm:flex-row">
@@ -49,7 +58,7 @@ export default function ArbPairCard({ pair }: { pair: ArbPair }) {
       </div>
       <div className="mt-3 flex justify-between border-t border-gray-800 pt-2 text-xs text-gray-400">
         <span>Combined cost <span className="font-mono text-gray-200">{money(pair.combined_cost)}</span></span>
-        <span>Max payoff <span className="font-mono text-gray-200">{money(pair.max_payoff)}</span></span>
+        <span>Payout <span className="font-mono text-gray-200">{money(pair.max_payoff)}</span></span>
       </div>
     </div>
   );

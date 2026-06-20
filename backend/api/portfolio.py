@@ -5,6 +5,8 @@ from fastapi import APIRouter, Request, Query, BackgroundTasks, HTTPException
 from database import get_setting, set_setting
 from models.schemas import (
     ManualPositionIn,
+    MarkSoldIn,
+    PairExitOut,
     PfMarketOut,
     PortfolioSummaryOut,
     WalletIn,
@@ -17,6 +19,15 @@ router = APIRouter(prefix="/portfolio")
 async def get_summary(request: Request):
     tracker = request.app.state.portfolio_tracker
     return await tracker.build_summary()
+
+
+@router.get("/pairs/{matched_market_id}/exit", response_model=PairExitOut)
+async def get_pair_exit(matched_market_id: int, request: Request):
+    tracker = request.app.state.portfolio_tracker
+    data = await tracker.build_pair_exit(matched_market_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="no open arbitrage pair for this market")
+    return data
 
 
 @router.post("/refresh")
@@ -44,16 +55,67 @@ async def delete_position(position_id: int, request: Request):
     return {"status": "deleted"}
 
 
+@router.post("/positions/{position_id}/sold")
+async def mark_sold(position_id: int, body: MarkSoldIn, request: Request):
+    """Mark a leg as sold (maker fill) with the proceeds received → moves the
+    pair to the Closing Arbitrage section."""
+    tracker = request.app.state.portfolio_tracker
+    await tracker.mark_sold(position_id, body.sold_shares, body.proceeds)
+    return {"status": "sold"}
+
+
+@router.post("/positions/{position_id}/reopen")
+async def reopen(position_id: int, request: Request):
+    tracker = request.app.state.portfolio_tracker
+    await tracker.reopen_position(position_id)
+    return {"status": "open"}
+
+
 @router.get("/pf-markets", response_model=list[PfMarketOut])
 async def pf_markets(request: Request, q: str = Query("", min_length=0), limit: int = Query(30, le=100)):
     db = request.app.state.db
-    like = f"%{q.strip()}%"
+
+    # PF markets where the user already holds a Polymarket position (side,
+    # shares, cost), so they can size the opposite leg to hedge into an arb.
+    holding: dict[str, dict] = {}
     async with db.execute(
-        "SELECT id, title, category_slug FROM pf_markets WHERE title LIKE ? ORDER BY title LIMIT ?",
-        (like, limit),
+        """SELECT m.pf_market_id, p.side, p.size, p.cost_usd FROM positions p
+           JOIN matched_markets m ON p.market_id = m.poly_condition_id
+           WHERE p.platform='polymarket' AND p.status='open'"""
     ) as cur:
-        rows = await cur.fetchall()
-    return [PfMarketOut(id=r["id"], title=r["title"], category_slug=r["category_slug"]) for r in rows]
+        for r in await cur.fetchall():
+            holding[str(r["pf_market_id"])] = {
+                "side": r["side"], "shares": r["size"], "cost": r["cost_usd"],
+            }
+
+    q = q.strip()
+    if not q:
+        # Default list = markets where you hold a Poly position (completable arbs).
+        if not holding:
+            return []
+        ph = ",".join("?" * len(holding))
+        async with db.execute(
+            f"SELECT id, title, category_slug FROM pf_markets WHERE id IN ({ph}) ORDER BY title",
+            list(holding.keys()),
+        ) as cur:
+            rows = await cur.fetchall()
+    else:
+        async with db.execute(
+            "SELECT id, title, category_slug FROM pf_markets WHERE title LIKE ? ORDER BY title LIMIT ?",
+            (f"%{q}%", limit),
+        ) as cur:
+            rows = await cur.fetchall()
+
+    out = []
+    for r in rows:
+        h = holding.get(str(r["id"])) or {}
+        out.append(PfMarketOut(
+            id=r["id"], title=r["title"], category_slug=r["category_slug"],
+            holding_poly_side=h.get("side"),
+            holding_poly_shares=h.get("shares"),
+            holding_poly_cost=h.get("cost"),
+        ))
+    return out
 
 
 @router.get("/wallets")
