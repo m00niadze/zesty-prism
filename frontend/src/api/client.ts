@@ -163,11 +163,26 @@ export interface PairStats {
   poly_volume: StatItem; poly_liquidity: StatItem; poly_spread: StatItem; pf_liquidity: StatItem; pf_spread: StatItem;
 }
 export interface OrderBook { asks: [number, number][]; bids: [number, number][]; }
+export interface HedgeRouteLeg {
+  kind: string; fillable: number; exec_price: number; slippage_pct: number;
+  fee: number; net_cost: number; pl_impact: number;
+}
+export interface HedgeRoute {
+  action: string; platform: string; side: string; shares: number;
+  current_shares: number; bought_at: number | null;
+  market: HedgeRouteLeg; limit: HedgeRouteLeg;
+  executable: boolean; note: string | null; lowest_cost: boolean; best_pl: boolean;
+}
+export interface Hedge {
+  hedged: boolean; imbalance_shares: number; imbalance_pct: number; target_shares: number;
+  overweight_platform: string; overweight_side: string; total_paid: number; routes: HedgeRoute[];
+}
 export interface PairExit {
   matched_market_id: number; title: string; poly_url: string; pf_url: string;
   est_ev: number; paid: number; bought_at: number; now_bid: number; ask_pnl: number; bid_pnl: number;
   strategies: ExitStrategy[]; best_index: number; legs: DetailLeg[]; combined: DetailLeg;
   stats: PairStats; poly_book: OrderBook; pf_book: OrderBook;
+  hedge: Hedge | null;
 }
 
 export const fetchPortfolioSummary = () =>

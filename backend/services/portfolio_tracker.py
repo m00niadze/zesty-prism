@@ -371,7 +371,7 @@ class PortfolioTracker:
     async def build_pair_exit(self, mm_id: int) -> dict | None:
         """Everything the position-detail view needs to EXIT an arb pair:
         per-leg details, the three sell-all strategies (with fees), stats, books."""
-        from services.arb_taker import exit_strategies
+        from services.arb_taker import exit_strategies, hedge_routes
 
         async with self._db.execute("SELECT * FROM matched_markets WHERE id=?", (mm_id,)) as c:
             mm = await c.fetchone()
@@ -423,6 +423,34 @@ class PortfolioTracker:
         combined = _combined_leg(poly_leg, pf_leg)
         matched = min(poly_shares, pf_shares) or 1.0
 
+        # Hedge status uses OPEN shares (size − sold), so a partly-sold leg is
+        # judged on what's still held — consistent with the position row/summary.
+        # bought_at stays the true avg entry (cost / size).
+        poly_open = poly_shares - (poly_pos.get("sold_shares") or 0.0)
+        pf_open = pf_shares - (pf_pos.get("sold_shares") or 0.0)
+        poly_avg = (poly_cost / poly_shares) if poly_shares > 0 else (poly_pos.get("avg_entry_price") or 0.0)
+        pf_avg = (pf_cost / pf_shares) if pf_shares > 0 else (pf_pos.get("avg_entry_price") or 0.0)
+        imbalance = abs(poly_open - pf_open)
+        hedged = imbalance < 1.0
+        poly_h = {"platform": "polymarket", "side": poly_side, "shares": poly_open,
+                  "bought_at": poly_avg, "book": poly_book, "best_ask": poly_best_ask,
+                  "best_bid": poly_best_bid, "fee_rate": poly_rate}
+        pf_h = {"platform": "predictfun", "side": pf_side, "shares": pf_open,
+                "bought_at": pf_avg, "book": pf_book, "best_ask": pf_best_ask,
+                "best_bid": pf_best_bid, "fee_rate": pf_rate}
+        over, under = (poly_h, pf_h) if poly_open >= pf_open else (pf_h, poly_h)
+        target = min(poly_open, pf_open)
+        hedge = {
+            "hedged": hedged,
+            "imbalance_shares": imbalance,
+            "imbalance_pct": (imbalance / target * 100.0) if target > 0 else 0.0,
+            "target_shares": target,
+            "overweight_platform": over["platform"],
+            "overweight_side": over["side"],
+            "total_paid": paid,
+            "routes": [] if hedged else hedge_routes(over, under, imbalance),
+        }
+
         return {
             "matched_market_id": mm["id"],
             "title": mm["poly_title"],
@@ -441,6 +469,7 @@ class PortfolioTracker:
             "stats": await self._market_stats(mm["id"]),
             "poly_book": {"asks": poly_book["asks"], "bids": poly_book["bids"]},
             "pf_book": {"asks": pf_book["asks"], "bids": pf_book["bids"]},
+            "hedge": hedge,
         }
 
     async def _pf_fee_rate(self, mm_id: int) -> float:

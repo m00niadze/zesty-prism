@@ -234,6 +234,42 @@ class OrderBookOut(BaseModel):
     bids: list[tuple[float, float]]
 
 
+class HedgeRouteLegOut(BaseModel):
+    kind: str            # "market" | "limit"
+    fillable: float
+    exec_price: float
+    slippage_pct: float
+    fee: float
+    net_cost: float      # + = you pay, − = you receive
+    pl_impact: float
+
+
+class HedgeRouteOut(BaseModel):
+    action: str          # "SELL" | "BUY"
+    platform: str        # "polymarket" | "predictfun"
+    side: str            # "YES" | "NO"
+    shares: float        # imbalance to fix
+    current_shares: float
+    bought_at: float | None = None
+    market: HedgeRouteLegOut
+    limit: HedgeRouteLegOut
+    executable: bool
+    note: str | None = None
+    lowest_cost: bool = False
+    best_pl: bool = False
+
+
+class HedgeOut(BaseModel):
+    hedged: bool
+    imbalance_shares: float
+    imbalance_pct: float
+    target_shares: float
+    overweight_platform: str
+    overweight_side: str
+    total_paid: float
+    routes: list[HedgeRouteOut] = []
+
+
 class PairExitOut(BaseModel):
     matched_market_id: int
     title: str
@@ -252,6 +288,7 @@ class PairExitOut(BaseModel):
     stats: PairStatsOut
     poly_book: OrderBookOut
     pf_book: OrderBookOut
+    hedge: HedgeOut | None = None
 
 
 class PnlSummaryOut(BaseModel):
