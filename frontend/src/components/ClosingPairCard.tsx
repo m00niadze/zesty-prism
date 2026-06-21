@@ -58,30 +58,20 @@ export default function ClosingPairCard({ closing, onChanged }: { closing: Closi
   };
 
   return (
-    <div className="rounded-xl border border-amber-800/40 bg-amber-950/10 p-4">
+    <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-semibold text-white" title={closing.title}>{closing.title}</span>
-            {!closing.hedged && (
-              <span
-                title={closing.hedge_action ?? "Your open shares are unequal — you're exposed on the difference."}
-                className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-400 ring-1 ring-amber-500/30"
-              >
-                ⚠ Not Hedged
-              </span>
-            )}
+            <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300 ring-1 ring-emerald-500/30">
+              ✓ Closed · settling
+            </span>
           </div>
-          <div className="text-[10px] uppercase tracking-wide text-amber-500/80">Closing · partly sold</div>
-          {!closing.hedged && closing.hedge_action && (
-            <div className="mt-0.5 text-[11px] text-amber-400/80">
-              {Math.round(closing.imbalance_shares)} shares unhedged · {closing.hedge_action}
-            </div>
-          )}
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">One leg sold · remainder still open</div>
         </div>
         <div className="shrink-0 text-right">
           <div className={`font-mono text-lg font-bold ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>{money(pnl)}</div>
-          <div className="text-[10px] uppercase tracking-wide text-gray-500">Exit now P&L</div>
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Full P&L (live)</div>
         </div>
       </div>
 

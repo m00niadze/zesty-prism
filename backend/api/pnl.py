@@ -19,12 +19,23 @@ async def get_pnl_summary(request: Request):
             if leg and leg.get("pnl") is not None:
                 unrealized += leg["pnl"]
 
+    # Closing positions (one leg fully sold, remainder still open) aren't in
+    # "pairs", so their profit was being dropped from the totals. Count each
+    # one's FULL live P&L (sold proceeds + current value of the open leg − paid)
+    # so Net PNL reflects the whole position, not just open arb pairs.
+    for closing in summary.get("closing", []):
+        unrealized += closing.get("exit_now_pnl") or 0.0
+
     async with db.execute(
         "SELECT COALESCE(SUM(realized_pnl), 0), COALESCE(SUM(fees_paid), 0) FROM pnl_records"
     ) as cur:
         row = await cur.fetchone()
         realized = row[0]
         fees = row[1]
+
+    # Completed (both-legs-sold) arbitrages aren't written to pnl_records, so add
+    # their realized profit here — this is what populates Realized PNL on the page.
+    realized += sum((c.get("profit") or 0.0) for c in summary.get("closed", []))
 
     return PnlSummaryOut(
         unrealized_pnl=unrealized,
@@ -60,3 +71,13 @@ async def get_pnl_positions(
         rows = await cur.fetchall()
 
     return {"items": [dict(r) for r in rows]}
+
+
+@router.get("/closed")
+async def get_closed_arbs(request: Request):
+    """Completed arbitrages — both legs fully sold. Each carries its realized
+    profit (proceeds − paid) and the leg ids, so the PNL page can list and
+    delete them (handy for clearing out fake/test positions)."""
+    tracker = request.app.state.portfolio_tracker
+    summary = await tracker.build_summary()
+    return {"items": summary.get("closed", [])}

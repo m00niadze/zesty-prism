@@ -218,7 +218,7 @@ class PortfolioTracker:
 
         _name = {"polymarket": "Polymarket", "predictfun": "Predict.fun"}
         EPS = 1e-6
-        pairs, closing = [], []
+        pairs, closing, closed = [], [], []
         for g in groups.values():
             poly_leg, pf_leg = g["poly"], g["pf"]
             legs = [l for l in (poly_leg, pf_leg) if l]
@@ -289,8 +289,19 @@ class PortfolioTracker:
                     "paid": paid, "exit_now_pnl": realized + open_value - paid,
                     "hedged": c_hedged, "imbalance_shares": c_imbalance, "hedge_action": c_action,
                 })
+            elif total_sold > EPS and poly_open <= EPS and pf_open <= EPS and poly_leg["side"] != pf_leg["side"]:
+                # BOTH legs fully sold → a completed (closed) arbitrage. Surface it
+                # in the PNL history with its realized profit; deletable from there.
+                paid = (poly_leg["cost"] or 0) + (pf_leg["cost"] or 0)
+                proceeds = sum(l.get("sold_proceeds") or 0.0 for l in legs)
+                closed.append({
+                    "matched_market_id": g["mm"]["id"], "title": g["mm"]["poly_title"],
+                    "paid": paid, "proceeds": proceeds, "profit": proceeds - paid,
+                    "closed_at": max((l.get("sold_at") or "") for l in legs) or None,
+                    "leg_ids": [l["id"] for l in legs],
+                })
             else:
-                for leg in legs:  # same-side / fully closed
+                for leg in legs:  # same-side / leftover
                     if leg["sold_shares"] <= 0:
                         standalone.append(leg)
 
@@ -305,6 +316,7 @@ class PortfolioTracker:
             },
             "pairs": pairs,
             "closing": closing,
+            "closed": closed,
             "standalone": standalone,
         }
 

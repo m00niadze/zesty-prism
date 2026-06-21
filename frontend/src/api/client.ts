@@ -219,6 +219,18 @@ export const addWallet = (address: string) =>
 export const removeWallet = (address: string) =>
   api.delete<{ wallets: string[] }>(`/portfolio/wallets/${address}`);
 
+export interface ClosedArb {
+  matched_market_id: number;
+  title: string;
+  paid: number;
+  proceeds: number;
+  profit: number;
+  closed_at: string | null;
+  leg_ids: number[];
+}
+
+export const fetchClosedArbs = () => api.get<{ items: ClosedArb[] }>("/pnl/closed");
+
 export const fetchPnlSummary = () =>
   api.get<{ unrealized_pnl: number; realized_pnl: number; total_fees_paid: number; net_pnl: number }>(
     "/pnl/summary"

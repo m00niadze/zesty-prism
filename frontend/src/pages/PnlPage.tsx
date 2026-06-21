@@ -7,7 +7,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { useEffect, useState } from "react";
 import { usePnl } from "../hooks/usePnl";
+import { ClosedArb, deletePosition, fetchClosedArbs } from "../api/client";
 
 function SummaryCard({
   label,
@@ -33,6 +35,18 @@ function fmt(v: number) {
 
 export default function PnlPage() {
   const { pnl, fees, loading } = usePnl();
+  const [closed, setClosed] = useState<ClosedArb[]>([]);
+  const loadClosed = () => fetchClosedArbs().then((r) => setClosed(r.data.items)).catch(() => {});
+  useEffect(() => {
+    loadClosed();
+    const t = setInterval(loadClosed, 30000);
+    return () => clearInterval(t);
+  }, []);
+  const removeClosed = async (c: ClosedArb) => {
+    if (!confirm("Delete this closed arbitrage? Removes both legs from the database.")) return;
+    await Promise.all(c.leg_ids.map((id) => deletePosition(id)));
+    loadClosed();
+  };
 
   if (loading) return <div className="text-center py-16 text-gray-500">Loading PNL...</div>;
 
@@ -103,6 +117,44 @@ export default function PnlPage() {
             <FeeRow platform="Total" fee={fees.total_fees} bold />
           </div>
         </div>
+      </div>
+
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
+        <h2 className="text-sm font-medium text-gray-400 mb-4 uppercase tracking-wide">
+          Closed Arbitrages ({closed.length})
+        </h2>
+        {closed.length === 0 ? (
+          <p className="text-sm text-gray-600">
+            No closed arbitrages yet. When both legs of a pair are fully sold, the completed trade lands here with its realized profit.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-gray-400">
+                  <th className="py-2 pr-4 font-medium">Market</th>
+                  <th className="py-2 px-4 text-right font-medium">Paid</th>
+                  <th className="py-2 px-4 text-right font-medium">Proceeds</th>
+                  <th className="py-2 px-4 text-right font-medium">Profit</th>
+                  <th className="py-2 pl-4"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {closed.map((c) => (
+                  <tr key={c.matched_market_id} className="border-t border-gray-800/60">
+                    <td className="py-2 pr-4 max-w-xs truncate text-white" title={c.title}>{c.title}</td>
+                    <td className="py-2 px-4 text-right font-mono text-gray-300">${c.paid.toFixed(2)}</td>
+                    <td className="py-2 px-4 text-right font-mono text-gray-300">${c.proceeds.toFixed(2)}</td>
+                    <td className={`py-2 px-4 text-right font-mono font-semibold ${c.profit >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(c.profit)}</td>
+                    <td className="py-2 pl-4 text-right">
+                      <button onClick={() => removeClosed(c)} className="text-gray-600 hover:text-red-400" title="Delete (removes both legs)">✕</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
