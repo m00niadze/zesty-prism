@@ -1,4 +1,5 @@
 .env
+.htpasswd
 __pycache__/
 *.pyc
 *.pyo
