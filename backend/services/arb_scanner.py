@@ -22,6 +22,12 @@ from services.price_cache import PriceCache
 logger = logging.getLogger(__name__)
 
 
+def _rel_change(new: float, old: float) -> float:
+    """Fractional change of `new` vs `old`, with a $1 floor on the denominator so
+    tiny dollar values don't look like huge swings."""
+    return abs(new - old) / max(abs(old), 1.0)
+
+
 @dataclass
 class ArbOpportunity:
     matched_market_id: int
@@ -93,22 +99,50 @@ class ArbScanner:
         self._book_cache: dict[tuple[str, str], tuple[float, object]] = {}
         # currently-live windows: (matched_market_id, strategy) → db id
         self._live: dict[tuple[int, str], int] = {}
-        # last time we alerted each window — used for a cooldown so a flapping
-        # market doesn't spam, without permanently muting it.
-        self._last_alert: dict[tuple[int, str], datetime] = {}
+        # Content-based de-dup so the SAME arb doesn't re-alert on every scan or
+        # when it flickers out of a scan and back. Per window we remember the
+        # economics we last alerted (edge %, max profit $, max wager $) and when,
+        # plus when it went stale (to re-arm a genuinely fresh recurrence).
+        self._alert_sig: dict[tuple[int, str], tuple[float, float, float]] = {}
+        self._last_alert_at: dict[tuple[int, str], datetime] = {}
+        self._gone_since: dict[tuple[int, str], datetime] = {}
 
-    # Don't re-alert the same window more often than this (avoids flap spam).
-    ALERT_COOLDOWN = timedelta(minutes=30)
+    # Re-alert an already-known arb ONLY when its economics move materially — not
+    # on a fixed timer, and not when it merely flickers out of a scan and back.
+    ALERT_PCT_DELTA = 0.5                     # edge change to re-alert, percentage points
+    ALERT_PROFIT_REL = 0.30                   # max-profit change to re-alert, fraction
+    ALERT_WAGER_REL = 0.30                    # tradable-depth change to re-alert, fraction
+    MIN_REALERT_GAP = timedelta(minutes=15)   # hard floor between alerts for one window
+    ALERT_REARM = timedelta(hours=2)          # gone this long → next sighting counts as fresh
 
     async def load_live_from_db(self) -> None:
         # Only load what's CURRENTLY live, so a restart doesn't re-alert markets
         # that are already open — but markets that aren't live now can alert
-        # again when they next cross the threshold.
+        # again when they next cross the threshold. Seed the alert signature too,
+        # so a restart never re-alerts a window that was already live (and already
+        # notified) at its current economics.
+        now = datetime.now(timezone.utc)
+        s = await self._get_settings()
         async with self._db.execute(
-            "SELECT id, matched_market_id, strategy FROM arb_opportunities WHERE is_live = 1"
+            "SELECT id, matched_market_id, strategy, net_pct_top, max_profit_usd, "
+            "max_wager_usd FROM arb_opportunities WHERE is_live = 1"
         ) as cur:
             for r in await cur.fetchall():
-                self._live[(r["matched_market_id"], r["strategy"])] = r["id"]
+                key = (r["matched_market_id"], r["strategy"])
+                self._live[key] = r["id"]
+                # Only seed the alert signature for windows that already MEET the
+                # thresholds (i.e. were presumably alerted before the restart), so
+                # a restart doesn't re-announce them. A sub-threshold window is
+                # left unseeded so it still alerts the moment it first crosses.
+                if (
+                    r["net_pct_top"] >= s["min_arb_pct"]
+                    and r["max_profit_usd"] >= s["min_profit_usd"]
+                    and r["max_wager_usd"] >= s["min_wager_usd"]
+                ):
+                    self._alert_sig[key] = (
+                        r["net_pct_top"], r["max_profit_usd"], r["max_wager_usd"]
+                    )
+                    self._last_alert_at[key] = now
 
     async def refresh_taker(self, poly_client, pf_client, pf_ws=None) -> None:
         """Two-stage scan. Stage 1: cheap best-ask screen over the price cache.
@@ -222,38 +256,71 @@ class ArbScanner:
         for opp in live:
             key = (opp.matched_market_id, opp.strategy)
             live_keys.add(key)
+
+            # If this window had gone away and stayed away long enough, treat its
+            # return as a brand-new crossing (drop its last-alerted signature) so
+            # a genuinely fresh recurrence still notifies.
+            gone_at = self._gone_since.pop(key, None)
+            if gone_at is not None and now - gone_at > self.ALERT_REARM:
+                self._alert_sig.pop(key, None)
+                self._last_alert_at.pop(key, None)
+
             if key in self._live:
-                await self._update_opportunity(self._live[key], opp)
+                db_id = self._live[key]
+                await self._update_opportunity(db_id, opp)
             else:
                 db_id = await self._insert_opportunity(opp)
                 self._live[key] = db_id
-                # Alert when a window first appears, gated by the user's
-                # thresholds and a per-window cooldown (so flapping ≠ spam, but
-                # a genuine fresh crossing later still notifies).
-                meets = (
-                    opp.net_pct_top >= s["min_arb_pct"]
-                    and opp.max_profit_usd >= s["min_profit_usd"]
-                    and opp.max_wager_usd >= s["min_wager_usd"]
+
+            # Alert only when it clears the user's thresholds AND it's materially
+            # different from what we last alerted for this window — so the same
+            # arb just sitting there (or flickering) doesn't spam.
+            meets = (
+                opp.net_pct_top >= s["min_arb_pct"]
+                and opp.max_profit_usd >= s["min_profit_usd"]
+                and opp.max_wager_usd >= s["min_wager_usd"]
+            )
+            if meets and self._should_alert(key, opp, now):
+                self._alert_sig[key] = (
+                    opp.net_pct_top, opp.max_profit_usd, opp.max_wager_usd
                 )
-                last = self._last_alert.get(key)
-                if meets and (last is None or now - last > self.ALERT_COOLDOWN):
-                    self._last_alert[key] = now
-                    await self._queue.put({"db_id": db_id, "opp": opp})
-                    logger.info(
-                        "NEW TAKER ARB (alerted): mid=%d %s top=%.2f%% max$%.2f wager$%.0f",
-                        opp.matched_market_id, opp.strategy,
-                        opp.net_pct_top, opp.max_profit_usd, opp.max_wager_usd,
-                    )
+                self._last_alert_at[key] = now
+                await self._queue.put({"db_id": db_id, "opp": opp})
+                logger.info(
+                    "ARB ALERT mid=%d %s top=%.2f%% max$%.2f wager$%.0f",
+                    opp.matched_market_id, opp.strategy,
+                    opp.net_pct_top, opp.max_profit_usd, opp.max_wager_usd,
+                )
 
         stale = [k for k in self._live if k not in live_keys]
         for key in stale:
             db_id = self._live.pop(key, None)
+            # Start the re-arm clock but KEEP the alert signature, so a quick
+            # flicker back doesn't count as a fresh arb.
+            self._gone_since.setdefault(key, now)
             if db_id:
                 await self._db.execute(
                     "UPDATE arb_opportunities SET is_live=0, closed_at=? WHERE id=?",
                     (utcnow(), db_id),
                 )
         await self._db.commit()
+
+    def _should_alert(self, key: tuple[int, str], opp: ArbOpportunity, now: datetime) -> bool:
+        """True if this window has never been alerted (or was re-armed after a long
+        absence), or its economics have moved past the re-alert thresholds. A hard
+        MIN_REALERT_GAP floor damps oscillation around a threshold boundary."""
+        prev = self._alert_sig.get(key)
+        if prev is None:
+            return True
+        last_at = self._last_alert_at.get(key)
+        if last_at is not None and now - last_at < self.MIN_REALERT_GAP:
+            return False
+        prev_pct, prev_profit, prev_wager = prev
+        return (
+            abs(opp.net_pct_top - prev_pct) >= self.ALERT_PCT_DELTA
+            or _rel_change(opp.max_profit_usd, prev_profit) >= self.ALERT_PROFIT_REL
+            or _rel_change(opp.max_wager_usd, prev_wager) >= self.ALERT_WAGER_REL
+        )
 
     async def _insert_opportunity(self, opp: ArbOpportunity) -> int:
         async with self._db.execute(
