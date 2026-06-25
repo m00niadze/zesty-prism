@@ -305,6 +305,18 @@ async def taker_refresh_loop(state: AppState) -> None:
             logger.error("Taker refresh error: %s", e)
 
 
+async def exit_scan_loop(state: AppState) -> None:
+    """Every EXIT_SCAN_SECONDS, re-price open hedged pairs and emit a take-profit
+    EXIT ALERT when one can be closed for a profit above the user's threshold."""
+    settings = state.settings
+    while True:
+        await asyncio.sleep(settings.EXIT_SCAN_SECONDS)
+        try:
+            await state.exit_alerter.scan()
+        except Exception as e:
+            logger.error("Exit scan error: %s", e)
+
+
 async def alert_push_loop(state: AppState) -> None:
     """Forward alert queue items to the bot container via HTTP."""
     import aiohttp as _aiohttp
@@ -327,8 +339,11 @@ async def alert_push_loop(state: AppState) -> None:
 
 
 def _serialize_alert(item: dict) -> dict:
+    if item.get("kind") == "exit":
+        return {"kind": "exit", **item["exit"]}
     opp = item["opp"]
     return {
+        "kind": "entry",
         "db_id": item["db_id"],
         "matched_market_id": opp.matched_market_id,
         "strategy": opp.strategy,
@@ -360,5 +375,6 @@ async def start_all(state: AppState) -> None:
     state.add_task(market_sync_loop(state))
     state.add_task(portfolio_sync_loop(state))
     state.add_task(taker_refresh_loop(state))
+    state.add_task(exit_scan_loop(state))
     state.add_task(alert_push_loop(state))
     logger.info("All background tasks started")

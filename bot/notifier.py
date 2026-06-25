@@ -8,7 +8,7 @@ import aiosqlite
 from telegram.ext import Application
 
 from database import get_setting
-from formatters import fmt_arb_alert
+from formatters import fmt_arb_alert, fmt_exit_alert
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +38,14 @@ class ArbNotifier:
             return aiohttp.web.Response(status=403, text="Forbidden")
 
         try:
-            opp = await request.json()
+            payload = await request.json()
         except Exception:
             return aiohttp.web.Response(status=400, text="Bad JSON")
 
-        asyncio.create_task(self._send_alert(opp))
+        if payload.get("kind") == "exit":
+            asyncio.create_task(self._send_exit_alert(payload))
+        else:
+            asyncio.create_task(self._send_alert(payload))
         return aiohttp.web.Response(status=200, text="ok")
 
     async def _send_alert(self, opp: dict) -> None:
@@ -80,6 +83,25 @@ class ArbNotifier:
             )
         except Exception as e:
             logger.error("Failed to send Telegram alert: %s", e)
+        finally:
+            await db.close()
+
+    async def _send_exit_alert(self, payload: dict) -> None:
+        db = await aiosqlite.connect(DB_PATH)
+        db.row_factory = aiosqlite.Row
+        try:
+            notify_enabled = await get_setting(db, "tg_notify_enabled", "1")
+            if notify_enabled != "1":
+                return
+            msg = fmt_exit_alert(payload, site_url=os.getenv("SITE_BASE_URL", ""))
+            await self._app.bot.send_message(
+                chat_id=self._settings.TELEGRAM_CHAT_ID,
+                text=msg,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error("Failed to send Telegram exit alert: %s", e)
         finally:
             await db.close()
 

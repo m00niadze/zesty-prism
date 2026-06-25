@@ -25,6 +25,7 @@ _SETTING_LABELS = {
     "min_arb_pct": "Min arb %",
     "min_profit_usd": "Min profit ($)",
     "min_wager_usd": "Min depth ($)",
+    "min_exit_profit_pct": "Min exit profit %",
     "notional_usd": "Notional / calc size ($)",
 }
 
@@ -68,6 +69,7 @@ def _settings_keyboard(s: dict) -> InlineKeyboardMarkup:
     cur_pct = s.get("min_arb_pct", "3.0")
     cur_usd = s.get("min_profit_usd", "5.0")
     cur_wager = s.get("min_wager_usd", "30")
+    cur_exit = s.get("min_exit_profit_pct", "1.0")
     cur_notional = s.get("notional_usd", "100")
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("─── Min arb %  (✏️ = type your own) ───", callback_data="noop")],
@@ -93,6 +95,14 @@ def _settings_keyboard(s: dict) -> InlineKeyboardMarkup:
             _opt("$100", 100.0, cur_wager, "set_min_wager_"),
             _opt("$500", 500.0, cur_wager, "set_min_wager_"),
             InlineKeyboardButton("✏️", callback_data="custom_min_wager_usd"),
+        ],
+        [InlineKeyboardButton("─── Min exit profit %  (take-profit alerts) ───", callback_data="noop")],
+        [
+            _opt("0.5%", 0.5, cur_exit, "set_exit_pct_"),
+            _opt("1%", 1.0, cur_exit, "set_exit_pct_"),
+            _opt("2%", 2.0, cur_exit, "set_exit_pct_"),
+            _opt("3%", 3.0, cur_exit, "set_exit_pct_"),
+            InlineKeyboardButton("✏️", callback_data="custom_min_exit_profit_pct"),
         ],
         [InlineKeyboardButton(f"✏️ Notional (calc size): ${cur_notional}", callback_data="custom_notional_usd")],
         [InlineKeyboardButton(notify_label, callback_data="toggle_notify")],
@@ -405,6 +415,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         elif data.startswith("set_min_usd_"):
             val = data.split("_")[-1]
             await set_setting(db, "min_profit_usd", val)
+            s = await get_all_settings(db)
+            await query.edit_message_text(fmt_settings(s), parse_mode="HTML",
+                                          reply_markup=_settings_keyboard(s))
+
+        elif data.startswith("set_exit_pct_"):
+            val = data.split("_")[-1]
+            await set_setting(db, "min_exit_profit_pct", val)
             s = await get_all_settings(db)
             await query.edit_message_text(fmt_settings(s), parse_mode="HTML",
                                           reply_markup=_settings_keyboard(s))

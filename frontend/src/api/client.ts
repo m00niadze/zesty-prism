@@ -77,6 +77,14 @@ export const fetchHistory = (limit = 100) =>
 export const fetchCalculator = (opportunityId: number) =>
   api.get<CalculatorData>(`/arb/opportunities/${opportunityId}/calculator`);
 
+export interface Sale {
+  id: number;
+  shares: number;
+  proceeds: number | null;   // null = pending (cash not entered yet)
+  source: string;            // 'manual' | 'auto'
+  sold_at: string;
+}
+
 export interface PositionLeg {
   id: number;
   platform: string;
@@ -92,6 +100,7 @@ export interface PositionLeg {
   source: string;
   status: string;
   sold_proceeds: number | null;
+  sales: Sale[];
 }
 
 export interface ClosingLeg {
@@ -103,6 +112,7 @@ export interface ClosingLeg {
   sold_proceeds: number;
   open_shares: number;
   open_value: number;
+  sales: Sale[];
 }
 
 export interface ClosingPair {
@@ -208,6 +218,15 @@ export const markSold = (id: number, sold_shares: number, proceeds: number) =>
 
 export const reopenPosition = (id: number) => api.post(`/portfolio/positions/${id}/reopen`);
 
+// ── Sales log (per-fill record of partial sells) ──
+export const addSale = (positionId: number, shares: number, proceeds: number | null) =>
+  api.post(`/portfolio/positions/${positionId}/sales`, { shares, proceeds });
+
+export const updateSale = (saleId: number, shares: number, proceeds: number | null) =>
+  api.patch(`/portfolio/sales/${saleId}`, { shares, proceeds });
+
+export const deleteSale = (saleId: number) => api.delete(`/portfolio/sales/${saleId}`);
+
 export const searchPfMarkets = (q: string) =>
   api.get<PfMarket[]>("/portfolio/pf-markets", { params: { q } });
 
@@ -219,6 +238,13 @@ export const addWallet = (address: string) =>
 export const removeWallet = (address: string) =>
   api.delete<{ wallets: string[] }>(`/portfolio/wallets/${address}`);
 
+export interface ClosedArbLeg {
+  platform: string;
+  side: string;
+  sold_proceeds: number;
+  sales: Sale[];
+}
+
 export interface ClosedArb {
   matched_market_id: number;
   title: string;
@@ -227,6 +253,7 @@ export interface ClosedArb {
   profit: number;
   closed_at: string | null;
   leg_ids: number[];
+  legs: ClosedArbLeg[];
 }
 
 export const fetchClosedArbs = () => api.get<{ items: ClosedArb[] }>("/pnl/closed");

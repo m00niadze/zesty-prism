@@ -57,6 +57,54 @@ def fmt_arb_alert(
     )
 
 
+def fmt_exit_alert(o: dict, site_url: str = "") -> str:
+    """Take-profit alert for an OPEN hedged pair that can be closed in profit."""
+    poly = o["poly"]
+    pf = o["pf"]
+    best = o["best"]
+    mkt = o.get("market_only", best)
+    title = o.get("title", "Unknown")
+    paid = o.get("paid", 0.0)
+
+    def _route_line(name: str, leg_pos: dict, strat_leg: dict) -> str:
+        kind = "Limit" if strat_leg.get("kind") == "limit" else "Market"
+        sh = strat_leg.get("shares") or leg_pos.get("shares") or 0
+        px = strat_leg.get("avg_price", 0.0)
+        return f"  {name} {leg_pos['side']}: {kind} sell {sh:g} @ <code>${px:.4f}</code>"
+
+    lines = [
+        "💰 <b>EXIT ALERT</b> — take profit",
+        "",
+        f"<b>{title}</b>",
+        "",
+        "<b>Your pair:</b>",
+        f"  Polymarket {poly['side']}: {poly['shares']:g} sh @ <code>${poly['avg_price']:.4f}</code>",
+        f"  Predict.fun {pf['side']}: {pf['shares']:g} sh @ <code>${pf['avg_price']:.4f}</code>",
+        f"  Paid <code>${paid:.2f}</code>  ·  sellable now <code>{o.get('now_sell_pct', 0.0):.1f}¢</code>"
+        f" (in at <code>{o.get('bought_pct', 0.0):.1f}¢</code>)",
+        "",
+        f"<b>Best exit:</b> {best['name']}",
+        f"  → close for <code>${best.get('total_value', 0.0):.2f}</code>  ·  "
+        f"profit <code>${best.get('net', 0.0):.2f}</code> (<code>{best.get('roi', 0.0):.2f}%</code>)",
+        _route_line("Polymarket", poly, best["poly"]),
+        _route_line("Predict.fun", pf, best["pf"]),
+    ]
+    # If the best route rests a limit order (not guaranteed to fill), also show the
+    # guaranteed-now floor: dumping both legs at market.
+    if best.get("name") != mkt.get("name"):
+        lines.append(
+            f"<i>Floor — both at market now: ${mkt.get('net', 0.0):.2f} "
+            f"({mkt.get('roi', 0.0):.2f}%)</i>"
+        )
+    lines.append("")
+    poly_url = o.get("poly_url") or "https://polymarket.com"
+    pf_url = o.get("pf_url") or "https://predict.fun"
+    if site_url:
+        lines.append(f'📊 <a href="{site_url.rstrip("/")}/portfolio">Open positions dashboard</a>')
+    lines.append(f'<a href="{poly_url}">Polymarket</a>  |  <a href="{pf_url}">Predict.fun</a>')
+    return "\n".join(lines)
+
+
 def fmt_arb_list(opps: list[dict], min_pct: float = 3.0, min_usd: float = 5.0, site_url: str = "") -> str:
     if not opps:
         return (
@@ -148,6 +196,7 @@ def fmt_settings(s: dict) -> str:
         f"Min arb %:        <code>{s.get('min_arb_pct', '3.0')}%</code>\n"
         f"Min profit (USD): <code>${s.get('min_profit_usd', '5.0')}</code>\n"
         f"Min depth (USD):  <code>${s.get('min_wager_usd', '30')}</code>\n"
+        f"Min exit profit:  <code>{s.get('min_exit_profit_pct', '1.0')}%</code>\n"
         f"Notifications:    {notify}\n"
         f"Wallets:          <code>{wallets}</code>\n\n"
         f"Tap the buttons below to change, or use /set_min_pct, /set_min_usd, /add_wallet, /remove_wallet."

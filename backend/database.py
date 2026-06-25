@@ -93,6 +93,22 @@ CREATE TABLE IF NOT EXISTS positions (
 
 CREATE INDEX IF NOT EXISTS idx_pos_wallet ON positions (wallet_address, status);
 
+-- One row per partial sell of a position leg (the "sales log"). The position's
+-- sold_shares/sold_proceeds are the SUM of its rows here. proceeds = NULL means a
+-- pending sale (shares left the wallet but the user hasn't entered the cash yet) —
+-- it counts toward sold_shares (so open_shares/hedge stay correct) but $0 toward
+-- proceeds until filled in.
+CREATE TABLE IF NOT EXISTS position_sales (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id   INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE,
+    shares        REAL    NOT NULL,
+    proceeds      REAL,
+    source        TEXT    NOT NULL DEFAULT 'manual',
+    sold_at       TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sales_pos ON position_sales (position_id);
+
 CREATE TABLE IF NOT EXISTS pf_markets (
     id              TEXT PRIMARY KEY,
     title           TEXT NOT NULL,
@@ -144,6 +160,7 @@ _DEFAULT_SETTINGS = {
     "min_arb_pct": "0.5",
     "min_profit_usd": "2.0",
     "notional_usd": "100.0",
+    "min_exit_profit_pct": "1.0",
     "wallet_addresses": "[]",
     "tg_notify_enabled": "1",
 }

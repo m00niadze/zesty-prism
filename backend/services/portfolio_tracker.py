@@ -46,64 +46,110 @@ class PortfolioTracker:
     async def _sync_polymarket(self, wallet: str) -> None:
         positions = await self._poly.get_positions(wallet)
         now = utcnow()
-        # Per-market Polymarket taker fee rate (by category) so the cost basis
-        # includes fees, not just share cost.
         async with self._db.execute(
             "SELECT poly_condition_id, poly_fee_rate FROM matched_markets"
         ) as cur:
             fee_rates = {r["poly_condition_id"]: (r["poly_fee_rate"] or 0.0) for r in await cur.fetchall()}
 
-        # Snapshot open arb Poly legs (a matched market with an open PF leg) so
-        # we can detect when one SELLS (disappears from the wallet) → it becomes
-        # a half-sold "closing" arb.
-        async with self._db.execute(
-            """SELECT p.id, p.market_id, p.size, p.current_price, p.cost_usd
-               FROM positions p
-               WHERE p.platform='polymarket' AND p.source='auto' AND p.status='open' AND p.wallet_address=?
-                 AND EXISTS (
-                   SELECT 1 FROM matched_markets mm
-                   JOIN positions pf ON pf.market_id=mm.pf_market_id AND pf.platform='predictfun' AND pf.status='open'
-                   WHERE mm.poly_condition_id = p.market_id)""",
-            (wallet,),
-        ) as cur:
-            arb_open = {r["market_id"]: dict(r) for r in await cur.fetchall()}
+        def _cost(size, avg, mid):
+            # Cost basis WITH the Polymarket taker fee (rate*shares*p*(1-p)).
+            if not avg:
+                return None
+            return size * avg + fee_rates.get(mid, 0.0) * size * avg * (1.0 - avg)
 
-        # Mark all auto Poly positions for this wallet closed; the upserts below
-        # reopen the ones still held, so positions that closed drop off.
-        await self._db.execute(
-            "UPDATE positions SET status='closed' WHERE wallet_address=? AND platform='polymarket' AND source='auto'",
-            (wallet,),
-        )
-        held: set[str] = set()
+        # Poly markets with an OPEN Predict.fun partner = arb legs. These are tracked
+        # through the sales log so partial sells are itemized and the cost basis
+        # stays put when shares leave the wallet; everything else keeps the simple
+        # wallet-mirror behaviour (size follows the wallet, sold ⇒ drops off).
+        async with self._db.execute(
+            """SELECT DISTINCT mm.poly_condition_id AS mid FROM matched_markets mm
+               JOIN positions pf ON pf.market_id=mm.pf_market_id
+                    AND pf.platform='predictfun' AND pf.status='open'"""
+        ) as cur:
+            arb_mids = {r["mid"] for r in await cur.fetchall()}
+
+        wallet_poly: dict[str, dict] = {}
         for pos in positions:
             market_id = str(pos.get("conditionId") or pos.get("market_id") or pos.get("marketId", ""))
-            title = pos.get("title") or pos.get("question") or pos.get("marketTitle", "")
-            outcome = (pos.get("outcome") or pos.get("side") or "").upper()
             size = float(pos.get("size") or 0.0)
-            avg_price = _safe_float(pos.get("avgPrice") or pos.get("averagePrice"))
-            cur_price = _safe_float(pos.get("curPrice") or pos.get("currentPrice"))
             if not market_id or size == 0:
                 continue
-            # Cost basis WITH the Polymarket taker fee (rate*shares*p*(1-p)).
-            base = size * avg_price if avg_price else (_safe_float(pos.get("initialValue")) or 0.0)
-            fee = fee_rates.get(market_id, 0.0) * size * avg_price * (1.0 - avg_price) if avg_price else 0.0
-            cost = base + fee
-            unrealized = (cur_price - avg_price) * size if (avg_price is not None and cur_price is not None) else None
-            held.add(market_id)
-            await self._upsert(wallet, "polymarket", "auto", market_id, title, outcome,
-                               size, avg_price, cur_price, unrealized, cost, now)
+            wallet_poly[market_id] = {
+                "title": pos.get("title") or pos.get("question") or pos.get("marketTitle", ""),
+                "outcome": (pos.get("outcome") or pos.get("side") or "").upper(),
+                "size": size,
+                "avg": _safe_float(pos.get("avgPrice") or pos.get("averagePrice")),
+                "cur": _safe_float(pos.get("curPrice") or pos.get("currentPrice")),
+                "initial": _safe_float(pos.get("initialValue")),
+            }
 
-        # An arb Poly leg that's no longer held has SOLD → mark it 'sold' with an
-        # estimated proceeds (last mark-to-market value; user can correct the
-        # exact maker fill in the Closing section).
-        for mid, info in arb_open.items():
-            if mid not in held:
-                size = info.get("size") or 0.0
-                proceeds = (info.get("current_price") or 0.0) * size
+        def _unreal(w):
+            return (w["cur"] - w["avg"]) * w["size"] if (w["avg"] is not None and w["cur"] is not None) else None
+
+        # ── Non-arb auto positions: legacy wallet-mirror (unchanged behaviour) ──
+        if arb_mids:
+            ph = ",".join("?" * len(arb_mids))
+            await self._db.execute(
+                f"UPDATE positions SET status='closed' WHERE wallet_address=? AND platform='polymarket' "
+                f"AND source='auto' AND status='open' AND market_id NOT IN ({ph})",
+                (wallet, *arb_mids),
+            )
+        else:
+            await self._db.execute(
+                "UPDATE positions SET status='closed' WHERE wallet_address=? AND platform='polymarket' "
+                "AND source='auto' AND status='open'",
+                (wallet,),
+            )
+        for mid, w in wallet_poly.items():
+            if mid in arb_mids:
+                continue
+            await self._upsert(wallet, "polymarket", "auto", mid, w["title"], w["outcome"],
+                               w["size"], w["avg"], w["cur"], _unreal(w), _cost(w["size"], w["avg"], mid), now)
+
+        # ── Arb legs: reconcile wallet vs DB through the sales log ──
+        db_arb: dict[str, dict] = {}
+        if arb_mids:
+            ph = ",".join("?" * len(arb_mids))
+            async with self._db.execute(
+                f"SELECT id, market_id, side, size, sold_shares, avg_entry_price, cost_usd "
+                f"FROM positions WHERE wallet_address=? AND platform='polymarket' AND source='auto' "
+                f"AND status='open' AND market_id IN ({ph})",
+                (wallet, *arb_mids),
+            ) as cur:
+                db_arb = {r["market_id"]: dict(r) for r in await cur.fetchall()}
+
+        for mid in arb_mids:
+            w = wallet_poly.get(mid)
+            db = db_arb.get(mid)
+            if db is None:
+                if w is not None:  # a newly-bought arb leg
+                    await self._upsert(wallet, "polymarket", "auto", mid, w["title"], w["outcome"],
+                                       w["size"], w["avg"], w["cur"], _unreal(w),
+                                       _cost(w["size"], w["avg"], mid), now)
+                continue
+            db_open = (db["size"] or 0.0) - (db["sold_shares"] or 0.0)
+            W = w["size"] if w else 0.0
+            if W < db_open - 1e-6:
+                # shares left the wallet → log a PENDING sale of the drop (cash TBD)
+                await self._add_sale_row(db["id"], db_open - W, None, "auto", now)
+                await self._recompute_sold(db["id"])
+                if w and w["cur"] is not None:
+                    await self._db.execute(
+                        "UPDATE positions SET current_price=?, fetched_at=? WHERE id=?",
+                        (w["cur"], now, db["id"]))
+            elif W > db_open + 1e-6 and w:
+                # bought more → grow the original size & cost basis
+                new_size = (db["size"] or 0.0) + (W - db_open)
+                avg = w["avg"] or db["avg_entry_price"] or 0.0
                 await self._db.execute(
-                    "UPDATE positions SET status='sold', sold_shares=?, sold_proceeds=?, sold_at=? WHERE id=?",
-                    (size, proceeds, now, info["id"]),
-                )
+                    "UPDATE positions SET size=?, avg_entry_price=?, current_price=?, cost_usd=?, "
+                    "status='open', fetched_at=? WHERE id=?",
+                    (new_size, avg, w["cur"], _cost(new_size, avg, mid), now, db["id"]))
+            elif w:
+                await self._db.execute(
+                    "UPDATE positions SET current_price=?, fetched_at=? WHERE id=?",
+                    (w["cur"], now, db["id"]))
+
         await self._db.commit()
 
     async def _sync_predictfun(self, wallet: str) -> None:
@@ -154,22 +200,109 @@ class PortfolioTracker:
         await self._db.execute("DELETE FROM positions WHERE id=?", (position_id,))
         await self._db.commit()
 
-    async def mark_sold(self, position_id: int, sold_shares: float, proceeds: float) -> None:
-        """Record a (possibly partial) sale of a leg: how many shares were sold
-        and the cash received. The unsold remainder stays open → the pair becomes
-        a 'closing' arb. sold_shares/proceeds are the cumulative totals."""
-        async with self._db.execute("SELECT size FROM positions WHERE id=?", (position_id,)) as cur:
-            row = await cur.fetchone()
-        total = (row["size"] if row else 0.0) or 0.0
-        sold = min(max(0.0, sold_shares), total)
-        status = "sold" if sold >= total - 1e-9 else "open"
+    # ── Sales log ─────────────────────────────────────────────────────────────
+    # Each partial sell is a row in position_sales; a position's sold_shares /
+    # sold_proceeds are the SUM of its rows (a NULL proceeds = a 'pending' sale,
+    # counted in sold_shares so open_shares/hedge stay right, $0 in proceeds until
+    # the user enters the cash).
+
+    async def _add_sale_row(self, position_id: int, shares: float,
+                            proceeds: float | None, source: str, now: str | None = None) -> None:
+        await self._db.execute(
+            "INSERT INTO position_sales (position_id, shares, proceeds, source, sold_at) "
+            "VALUES (?,?,?,?,?)",
+            (position_id, shares, proceeds, source, now or utcnow()),
+        )
+
+    async def _recompute_sold(self, position_id: int) -> None:
+        """Refresh a position's cached sold_shares/sold_proceeds/status from its
+        sales log."""
+        async with self._db.execute(
+            "SELECT COALESCE(SUM(shares),0) AS s, SUM(proceeds) AS p, COUNT(*) AS n "
+            "FROM position_sales WHERE position_id=?",
+            (position_id,),
+        ) as cur:
+            r = await cur.fetchone()
+        sold = r["s"] or 0.0
+        proceeds = r["p"]  # NULL if every lot is still pending
+        if sold <= 1e-9:
+            # No (live) sales rows. Don't wipe a legacy sold_shares that predates
+            # the sales log (e.g. a position settled the old way).
+            async with self._db.execute(
+                "SELECT sold_shares FROM positions WHERE id=?", (position_id,)
+            ) as cur:
+                pr = await cur.fetchone()
+            if r["n"] == 0 and pr and (pr["sold_shares"] or 0) > 0:
+                return
+            await self._db.execute(
+                "UPDATE positions SET sold_shares=0, sold_proceeds=NULL, sold_at=NULL, status='open' "
+                "WHERE id=?",
+                (position_id,),
+            )
+            return
+        async with self._db.execute(
+            "SELECT size, sold_at FROM positions WHERE id=?", (position_id,)
+        ) as cur:
+            pr = await cur.fetchone()
+        size = (pr["size"] if pr else 0.0) or 0.0
+        status = "sold" if sold >= size - 1e-9 else "open"
+        sold_at = (pr["sold_at"] if pr and pr["sold_at"] else utcnow())
         await self._db.execute(
             "UPDATE positions SET sold_shares=?, sold_proceeds=?, sold_at=?, status=? WHERE id=?",
-            (sold, proceeds, utcnow(), status, position_id),
+            (sold, proceeds, sold_at, status, position_id),
         )
+
+    async def list_sales(self, position_id: int) -> list[dict]:
+        async with self._db.execute(
+            "SELECT id, shares, proceeds, source, sold_at FROM position_sales "
+            "WHERE position_id=? ORDER BY id",
+            (position_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def add_sale(self, position_id: int, shares: float,
+                       proceeds: float | None, source: str = "manual") -> None:
+        await self._add_sale_row(position_id, shares, proceeds, source)
+        await self._recompute_sold(position_id)
+        await self._db.commit()
+
+    async def update_sale(self, sale_id: int, shares: float, proceeds: float | None) -> None:
+        async with self._db.execute(
+            "SELECT position_id FROM position_sales WHERE id=?", (sale_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return
+        await self._db.execute(
+            "UPDATE position_sales SET shares=?, proceeds=? WHERE id=?",
+            (shares, proceeds, sale_id),
+        )
+        await self._recompute_sold(row["position_id"])
+        await self._db.commit()
+
+    async def delete_sale(self, sale_id: int) -> None:
+        async with self._db.execute(
+            "SELECT position_id FROM position_sales WHERE id=?", (sale_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return
+        await self._db.execute("DELETE FROM position_sales WHERE id=?", (sale_id,))
+        await self._recompute_sold(row["position_id"])
+        await self._db.commit()
+
+    async def mark_sold(self, position_id: int, sold_shares: float, proceeds: float) -> None:
+        """Legacy 'set the cumulative total' entry point (old Closing-card edit).
+        Reimplemented on the sales log: replace the log with a single lot."""
+        await self._db.execute("DELETE FROM position_sales WHERE position_id=?", (position_id,))
+        if sold_shares and sold_shares > 0:
+            await self._add_sale_row(position_id, sold_shares, proceeds, "manual")
+        await self._recompute_sold(position_id)
         await self._db.commit()
 
     async def reopen_position(self, position_id: int) -> None:
+        """Undo all sales for this leg → fully open again."""
+        await self._db.execute("DELETE FROM position_sales WHERE position_id=?", (position_id,))
         await self._db.execute(
             "UPDATE positions SET status='open', sold_proceeds=NULL, sold_at=NULL, sold_shares=0 WHERE id=?",
             (position_id,),
@@ -275,6 +408,7 @@ class PortfolioTracker:
                         "total_shares": l["shares"], "sold_shares": l["sold_shares"],
                         "sold_proceeds": l.get("sold_proceeds") or 0.0,
                         "open_shares": l["open_shares"], "open_value": ov,
+                        "sales": l.get("sales") or [],
                     })
                 c_imbalance = abs(poly_open - pf_open)
                 c_hedged = c_imbalance < 1.0
@@ -299,6 +433,12 @@ class PortfolioTracker:
                     "paid": paid, "proceeds": proceeds, "profit": proceeds - paid,
                     "closed_at": max((l.get("sold_at") or "") for l in legs) or None,
                     "leg_ids": [l["id"] for l in legs],
+                    "legs": [
+                        {"platform": l["platform"], "side": l["side"],
+                         "sold_proceeds": l.get("sold_proceeds") or 0.0,
+                         "sales": l.get("sales") or []}
+                        for l in legs
+                    ],
                 })
             else:
                 for leg in legs:  # same-side / leftover
@@ -318,6 +458,94 @@ class PortfolioTracker:
             "closing": closing,
             "closed": closed,
             "standalone": standalone,
+        }
+
+    async def scan_pair_exits(self, min_profit_pct: float) -> list[dict]:
+        """For every OPEN hedged pair, compute the best exit route right now and
+        return the ones whose best-route ROI ≥ min_profit_pct, as plain (JSON-
+        serializable) dicts ready to hand to the exit-alert formatter. Lean on
+        purpose (no stats/ranking) so it can run on a few-second cadence."""
+        async with self._db.execute(
+            "SELECT * FROM positions WHERE status='open'"
+        ) as c:
+            positions = [dict(r) for r in await c.fetchall()]
+        poly_by = {p["market_id"]: p for p in positions if p["platform"] == "polymarket"}
+        pf_by = {str(p["market_id"]): p for p in positions if p["platform"] == "predictfun"}
+        if not poly_by or not pf_by:
+            return []
+
+        async with self._db.execute(
+            """SELECT id, poly_condition_id, pf_market_id, poly_title, poly_slug,
+                      pf_category_slug, poly_yes_token_id, poly_no_token_id, poly_fee_rate
+               FROM matched_markets WHERE is_active=1"""
+        ) as c:
+            mms = [dict(r) for r in await c.fetchall()]
+
+        out: list[dict] = []
+        for mm in mms:
+            poly_pos = poly_by.get(mm["poly_condition_id"])
+            pf_pos = pf_by.get(str(mm["pf_market_id"]))
+            if not poly_pos or not pf_pos:
+                continue
+            poly_side = (poly_pos["side"] or "").upper()
+            pf_side = (pf_pos["side"] or "").upper()
+            if poly_side == pf_side or poly_side not in ("YES", "NO") or pf_side not in ("YES", "NO"):
+                continue  # only true YES/NO hedges
+            poly_open = (poly_pos["size"] or 0.0) - (poly_pos.get("sold_shares") or 0.0)
+            pf_open = (pf_pos["size"] or 0.0) - (pf_pos.get("sold_shares") or 0.0)
+            if poly_open <= 1e-6 or pf_open <= 1e-6:
+                continue
+            try:
+                res = await self._evaluate_exit(mm, poly_pos, pf_pos, poly_side, pf_side, poly_open, pf_open)
+            except Exception as e:
+                logger.debug("exit scan eval failed mm=%s: %s", mm["id"], e)
+                continue
+            if res and res["best"]["roi"] >= min_profit_pct:
+                out.append(res)
+        return out
+
+    async def _evaluate_exit(self, mm, poly_pos, pf_pos, poly_side, pf_side, poly_open, pf_open) -> dict | None:
+        from services.arb_taker import exit_strategies
+
+        poly_token = mm["poly_yes_token_id"] if poly_side == "YES" else mm["poly_no_token_id"]
+        poly_book = await self._poly.get_book(poly_token)
+        pf_ob = await self._pf.get_order_book(str(mm["pf_market_id"]))
+        pf_book = _pf_side_book(pf_ob.get("yes_asks", []), pf_ob.get("yes_bids", []), pf_side)
+
+        poly_best_ask = poly_book["asks"][0][0] if poly_book["asks"] else 0.0
+        pf_best_ask = pf_book["asks"][0][0] if pf_book["asks"] else 0.0
+
+        # Cost basis for the OPEN (unsold) shares only.
+        poly_paid = _open_cost(poly_pos, poly_open)
+        pf_paid = _open_cost(pf_pos, pf_open)
+        paid = poly_paid + pf_paid
+        if paid <= 0:
+            return None
+
+        poly_rate = mm["poly_fee_rate"] or 0.0
+        pf_rate = await self._pf_fee_rate(mm["id"])
+        strategies, best = exit_strategies(
+            poly_book["bids"], poly_best_ask, poly_open, poly_rate,
+            pf_book["bids"], pf_best_ask, pf_open, pf_rate, paid,
+        )
+        matched = min(poly_open, pf_open) or 1.0
+        # The guaranteed-executable floor: sell both legs at market right now.
+        market_only = next((s for s in strategies if s.name == "Two Market Sells"), strategies[best])
+        return {
+            "matched_market_id": mm["id"],
+            "title": mm["poly_title"],
+            "poly_url": f"https://polymarket.com/event/{mm['poly_slug']}" if mm.get("poly_slug") else "https://polymarket.com",
+            "pf_url": f"https://predict.fun/market/{mm['pf_category_slug']}" if mm.get("pf_category_slug") else "https://predict.fun",
+            "paid": paid,
+            "bought_pct": (paid / matched) * 100.0,
+            "now_sell_pct": (strategies[best].total_value / matched) * 100.0,
+            "poly": {"side": poly_side, "shares": poly_open,
+                     "avg_price": (poly_paid / poly_open) if poly_open else 0.0},
+            "pf": {"side": pf_side, "shares": pf_open,
+                   "avg_price": (pf_paid / pf_open) if pf_open else 0.0},
+            "best": _strat_dict(strategies[best]),
+            "market_only": _strat_dict(market_only),
+            "strategies": [_strat_dict(s) for s in strategies],
         }
 
     async def _open_leg_market_value(self, leg: dict, mm: dict) -> float:
@@ -362,6 +590,7 @@ class PortfolioTracker:
             "sold_proceeds": p.get("sold_proceeds"),
             "sold_shares": p.get("sold_shares") or 0.0,
             "open_shares": max(0.0, shares - (p.get("sold_shares") or 0.0)),
+            "sales": await self.list_sales(p["id"]),
         }
 
     async def _pf_current_price(self, market_id: str, side: str, mm: dict | None) -> float | None:
@@ -571,6 +800,16 @@ def _combined_leg(a: dict, b: dict) -> dict:
 def _strat_dict(s) -> dict:
     return {"name": s.name, "poly": vars(s.poly), "pf": vars(s.pf),
             "total_value": s.total_value, "net": s.net, "roi": s.roi}
+
+
+def _open_cost(pos: dict, open_shares: float) -> float:
+    """Cost basis of the still-open shares: prorate cost_usd by the open fraction
+    (falls back to avg_entry_price * open_shares)."""
+    size = pos.get("size") or 0.0
+    cost = pos.get("cost_usd")
+    if cost is not None and size > 0:
+        return cost * (open_shares / size)
+    return open_shares * (pos.get("avg_entry_price") or 0.0)
 
 
 def _stat_label(key: str, rank: int, total: int) -> str | None:

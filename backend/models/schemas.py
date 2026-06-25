@@ -77,6 +77,19 @@ class PortfolioOut(BaseModel):
     total_unrealized_pnl: float
 
 
+class SaleOut(BaseModel):
+    id: int
+    shares: float
+    proceeds: float | None = None   # None = pending (cash not entered yet)
+    source: str = "manual"          # 'manual' | 'auto'
+    sold_at: str
+
+
+class SaleIn(BaseModel):
+    shares: float
+    proceeds: float | None = None
+
+
 class PositionLegOut(BaseModel):
     id: int
     platform: str
@@ -92,6 +105,7 @@ class PositionLegOut(BaseModel):
     source: str
     status: str = "open"
     sold_proceeds: float | None = None
+    sales: list[SaleOut] = []
 
 
 class ClosingLegOut(BaseModel):
@@ -103,6 +117,7 @@ class ClosingLegOut(BaseModel):
     sold_proceeds: float
     open_shares: float
     open_value: float
+    sales: list[SaleOut] = []
 
 
 class ClosingPairOut(BaseModel):

@@ -1,51 +1,29 @@
-import { useState } from "react";
-import { ClosingLeg, ClosingPair, deletePosition, markSold, reopenPosition } from "../api/client";
+import { ClosingLeg, ClosingPair, deletePosition, reopenPosition } from "../api/client";
+import SalesPanel from "./SalesPanel";
 
 const money = (n: number) => `${n < 0 ? "-" : ""}$${Math.abs(n).toFixed(2)}`;
 const plat = (p: string) => (p === "polymarket" ? "Polymarket" : "Predict.fun");
 const sideClass = (s: string) => (s === "YES" ? "bg-emerald-900 text-emerald-300" : "bg-red-900 text-red-300");
 
-function LegRow({ leg, onChanged }: { leg: ClosingLeg; onChanged: () => void }) {
-  const [editing, setEditing] = useState(false);
-  const [sh, setSh] = useState(String(Math.round(leg.sold_shares)));
-  const [pr, setPr] = useState(String(leg.sold_proceeds.toFixed(2)));
-
-  const save = async () => {
-    const shares = Number(sh), proceeds = Number(pr);
-    if (!isNaN(shares) && !isNaN(proceeds)) await markSold(leg.id, shares, proceeds);
-    setEditing(false);
-    onChanged();
-  };
-
+function LegBlock({ leg, onChanged }: { leg: ClosingLeg; onChanged: () => void }) {
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3 text-xs">
-      <div className="mb-1 flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-gray-500">{plat(leg.platform)}</span>
         <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${sideClass(leg.side)}`}>{leg.side}</span>
         <span className="text-gray-600">{Math.round(leg.total_shares)} sh total</span>
+        {leg.open_shares > 0.5 && (
+          <span className="text-gray-400">· open {Math.round(leg.open_shares)} sh → <span className="font-mono">{money(leg.open_value)}</span></span>
+        )}
       </div>
-      {editing ? (
-        <div className="flex flex-wrap items-center gap-1">
-          <span className="text-gray-500">sold</span>
-          <input value={sh} onChange={(e) => setSh(e.target.value)} className="w-14 rounded bg-gray-800 px-1.5 py-0.5 text-white" /> sh for $
-          <input value={pr} onChange={(e) => setPr(e.target.value)} className="w-16 rounded bg-gray-800 px-1.5 py-0.5 text-white" />
-          <button onClick={save} className="text-emerald-400">✓</button>
-          <button onClick={() => setEditing(false)} className="text-gray-500">✕</button>
-        </div>
-      ) : (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-          <span className="text-emerald-400">sold {Math.round(leg.sold_shares)} sh → <span className="font-mono">{money(leg.sold_proceeds)}</span></span>
-          <span className="text-gray-400">open {Math.round(leg.open_shares)} sh → <span className="font-mono">{money(leg.open_value)}</span></span>
-          <button onClick={() => setEditing(true)} className="text-[10px] text-blue-400 hover:underline">edit</button>
-        </div>
-      )}
+      <SalesPanel legId={leg.id} label={`${plat(leg.platform)} ${leg.side}`} sales={leg.sales} onChanged={onChanged} />
     </div>
   );
 }
 
 export default function ClosingPairCard({ closing, onChanged }: { closing: ClosingPair; onChanged: () => void }) {
   const pnl = closing.exit_now_pnl;
-  const auto = closing.legs.some((l) => l.platform === "polymarket" && l.sold_shares > 0);
+  const pendingCash = closing.legs.some((l) => l.sales.some((s) => s.proceeds === null));
 
   const done = async () => {
     if (!confirm("Remove this closing position? (Deletes both legs.)")) return;
@@ -76,10 +54,10 @@ export default function ClosingPairCard({ closing, onChanged }: { closing: Closi
       </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {closing.legs.map((l) => <LegRow key={l.id} leg={l} onChanged={onChanged} />)}
+        {closing.legs.map((l) => <LegBlock key={l.id} leg={l} onChanged={onChanged} />)}
       </div>
 
-      {auto && <div className="mt-2 text-[10px] text-amber-500/70">Polymarket sale auto-estimated — hit “edit” to set your exact shares &amp; fill.</div>}
+      {pendingCash && <div className="mt-2 text-[10px] text-amber-500/80">A sale is missing its cash amount — hit “💵 Enter amount” so it counts toward your realized P&amp;L.</div>}
 
       <div className="mt-3 flex items-center justify-between border-t border-gray-800 pt-2 text-xs text-gray-500">
         <span>Paid <span className="font-mono text-gray-300">{money(closing.paid)}</span> · realized <span className="font-mono text-gray-300">{money(closing.realized)}</span> + remaining <span className="font-mono text-gray-300">{money(closing.open_value)}</span></span>

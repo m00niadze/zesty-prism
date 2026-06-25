@@ -120,8 +120,8 @@ export default function PortfolioPage() {
                 return sp ? (
                   <PositionDetail
                     matchedMarketId={selectedPairId}
-                    pfLegId={sp.pf.id}
-                    pfShares={sp.pf.shares}
+                    polyLeg={sp.poly}
+                    pfLeg={sp.pf}
                     onClose={() => setSelectedPairId(null)}
                     onChanged={reload}
                   />

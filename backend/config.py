@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # worth alerting on — thin few-dollar crosses vanish before you can trade.
     MIN_WAGER_USD: float = 30.0
     NOTIONAL_USD: float = 100.0
+    # Take-profit: alert when an OPEN hedged pair can be closed for a profit of at
+    # least this % over what was paid (user-tunable from the Telegram /settings).
+    MIN_EXIT_PROFIT_PCT: float = 1.0
 
     # Taker fees. Polymarket: per-market category rate (crypto 7%, sports 3%,
     # politics/finance/tech 4%, economics/culture/other 5%, geopolitics 0) applied
@@ -50,6 +53,9 @@ class Settings(BaseSettings):
     OPPORTUNITY_EXPIRY_SECONDS: int = 10
     PRICE_STALENESS_SECONDS: int = 30
     TAKER_REFRESH_SECONDS: int = 3
+    # How often to re-price open hedged pairs for take-profit exit alerts. Only a
+    # handful of held pairs, so a tight cadence is cheap and catches fast spikes.
+    EXIT_SCAN_SECONDS: int = 5
     # Stage 2 walks REST order books (Predict.fun + Polymarket) for each
     # candidate. Both platforms rate-limit heavy polling, so: (a) cap how many
     # candidates we walk per scan (live arbs always re-walked; rest sampled), and

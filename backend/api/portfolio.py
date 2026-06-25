@@ -9,6 +9,7 @@ from models.schemas import (
     PairExitOut,
     PfMarketOut,
     PortfolioSummaryOut,
+    SaleIn,
     WalletIn,
 )
 
@@ -69,6 +70,40 @@ async def reopen(position_id: int, request: Request):
     tracker = request.app.state.portfolio_tracker
     await tracker.reopen_position(position_id)
     return {"status": "open"}
+
+
+@router.get("/positions/{position_id}/sales")
+async def list_sales(position_id: int, request: Request):
+    tracker = request.app.state.portfolio_tracker
+    return {"items": await tracker.list_sales(position_id)}
+
+
+@router.post("/positions/{position_id}/sales")
+async def add_sale(position_id: int, body: SaleIn, request: Request):
+    """Log a single partial sell of a leg (shares + cash received). proceeds may be
+    null for a 'pending' sale awaiting the cash figure."""
+    tracker = request.app.state.portfolio_tracker
+    if body.shares <= 0:
+        raise HTTPException(status_code=400, detail="shares must be > 0")
+    await tracker.add_sale(position_id, body.shares, body.proceeds)
+    return {"status": "added"}
+
+
+@router.patch("/sales/{sale_id}")
+async def update_sale(sale_id: int, body: SaleIn, request: Request):
+    """Edit a logged sale — used to fill in a pending sale's cash, or fix a typo."""
+    tracker = request.app.state.portfolio_tracker
+    if body.shares <= 0:
+        raise HTTPException(status_code=400, detail="shares must be > 0")
+    await tracker.update_sale(sale_id, body.shares, body.proceeds)
+    return {"status": "updated"}
+
+
+@router.delete("/sales/{sale_id}")
+async def delete_sale(sale_id: int, request: Request):
+    tracker = request.app.state.portfolio_tracker
+    await tracker.delete_sale(sale_id)
+    return {"status": "deleted"}
 
 
 @router.get("/pf-markets", response_model=list[PfMarketOut])

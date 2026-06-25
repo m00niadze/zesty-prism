@@ -7,7 +7,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { usePnl } from "../hooks/usePnl";
 import { ClosedArb, deletePosition, fetchClosedArbs } from "../api/client";
 
@@ -33,9 +33,35 @@ function fmt(v: number) {
   return `${sign}$${v.toFixed(2)}`;
 }
 
+const plat = (p: string) => (p === "polymarket" ? "Polymarket" : "Predict.fun");
+
+function ClosedBreakdown({ c }: { c: ClosedArb }) {
+  return (
+    <div className="space-y-1.5 px-1 py-2 text-xs">
+      {(c.legs ?? []).map((leg, i) => {
+        const lots = (leg.sales ?? []).filter((s) => s.proceeds !== null);
+        return (
+          <div key={i} className="flex flex-wrap items-baseline gap-x-2">
+            <span className="text-gray-400">{plat(leg.platform)} <span className="font-semibold text-gray-200">{leg.side}</span></span>
+            <span className="font-mono text-emerald-300">→ ${leg.sold_proceeds.toFixed(2)}</span>
+            <span className="text-gray-500">
+              {lots.length === 0
+                ? "(no itemized fills)"
+                : lots
+                    .map((s) => `${Math.round(s.shares)} @ ${Math.round(((s.proceeds ?? 0) / s.shares) * 100)}¢`)
+                    .join(" · ")}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function PnlPage() {
   const { pnl, fees, loading } = usePnl();
   const [closed, setClosed] = useState<ClosedArb[]>([]);
+  const [openId, setOpenId] = useState<number | null>(null);
   const loadClosed = () => fetchClosedArbs().then((r) => setClosed(r.data.items)).catch(() => {});
   useEffect(() => {
     loadClosed();
@@ -141,15 +167,31 @@ export default function PnlPage() {
               </thead>
               <tbody>
                 {closed.map((c) => (
-                  <tr key={c.matched_market_id} className="border-t border-gray-800/60">
-                    <td className="py-2 pr-4 max-w-xs truncate text-white" title={c.title}>{c.title}</td>
-                    <td className="py-2 px-4 text-right font-mono text-gray-300">${c.paid.toFixed(2)}</td>
-                    <td className="py-2 px-4 text-right font-mono text-gray-300">${c.proceeds.toFixed(2)}</td>
-                    <td className={`py-2 px-4 text-right font-mono font-semibold ${c.profit >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(c.profit)}</td>
-                    <td className="py-2 pl-4 text-right">
-                      <button onClick={() => removeClosed(c)} className="text-gray-600 hover:text-red-400" title="Delete (removes both legs)">✕</button>
-                    </td>
-                  </tr>
+                  <Fragment key={c.matched_market_id}>
+                    <tr className="border-t border-gray-800/60">
+                      <td className="py-2 pr-4 max-w-xs truncate text-white" title={c.title}>
+                        <button
+                          onClick={() => setOpenId(openId === c.matched_market_id ? null : c.matched_market_id)}
+                          className="mr-1.5 text-gray-500 hover:text-gray-300"
+                          title="Show the sale-by-sale breakdown"
+                        >
+                          {openId === c.matched_market_id ? "▾" : "▸"}
+                        </button>
+                        {c.title}
+                      </td>
+                      <td className="py-2 px-4 text-right font-mono text-gray-300">${c.paid.toFixed(2)}</td>
+                      <td className="py-2 px-4 text-right font-mono text-gray-300">${c.proceeds.toFixed(2)}</td>
+                      <td className={`py-2 px-4 text-right font-mono font-semibold ${c.profit >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmt(c.profit)}</td>
+                      <td className="py-2 pl-4 text-right">
+                        <button onClick={() => removeClosed(c)} className="text-gray-600 hover:text-red-400" title="Delete (removes both legs)">✕</button>
+                      </td>
+                    </tr>
+                    {openId === c.matched_market_id && (
+                      <tr className="bg-gray-950/40">
+                        <td colSpan={5}><ClosedBreakdown c={c} /></td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

@@ -53,6 +53,8 @@ async def lifespan(app: FastAPI):
     state.portfolio_tracker = PortfolioTracker(
         state.db, state.poly_client, state.pf_client, settings, state.price_cache
     )
+    from services.exit_alerter import ExitAlerter
+    state.exit_alerter = ExitAlerter(state.db, state.portfolio_tracker, state.alert_queue)
 
     app.state.db = state.db
     app.state.portfolio_tracker = state.portfolio_tracker
