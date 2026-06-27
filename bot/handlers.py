@@ -119,7 +119,7 @@ async def _fetch_arb(db: aiosqlite.Connection) -> str:
                   m.poly_slug, m.pf_category_slug
            FROM arb_opportunities a
            JOIN matched_markets m ON a.matched_market_id = m.id
-           WHERE a.is_live = 1 AND a.net_pct_top >= ? AND a.max_profit_usd >= ?
+           WHERE a.is_live = 1 AND a.net_profit_pct >= ? AND a.max_profit_usd >= ?
                  AND a.max_wager_usd >= ?
            ORDER BY a.max_profit_usd DESC
            LIMIT 10""",

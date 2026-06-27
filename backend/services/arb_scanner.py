@@ -124,8 +124,8 @@ class ArbScanner:
         now = datetime.now(timezone.utc)
         s = await self._get_settings()
         async with self._db.execute(
-            "SELECT id, matched_market_id, strategy, net_pct_top, max_profit_usd, "
-            "max_wager_usd FROM arb_opportunities WHERE is_live = 1"
+            "SELECT id, matched_market_id, strategy, net_pct_top, net_profit_pct, "
+            "max_profit_usd, max_wager_usd FROM arb_opportunities WHERE is_live = 1"
         ) as cur:
             for r in await cur.fetchall():
                 key = (r["matched_market_id"], r["strategy"])
@@ -134,8 +134,10 @@ class ArbScanner:
                 # thresholds (i.e. were presumably alerted before the restart), so
                 # a restart doesn't re-announce them. A sub-threshold window is
                 # left unseeded so it still alerts the moment it first crosses.
+                # min_arb_pct is checked against the REALISTIC blended edge
+                # (net_profit_pct = profit/size), not the top-of-book peak.
                 if (
-                    r["net_pct_top"] >= s["min_arb_pct"]
+                    r["net_profit_pct"] >= s["min_arb_pct"]
                     and r["max_profit_usd"] >= s["min_profit_usd"]
                     and r["max_wager_usd"] >= s["min_wager_usd"]
                 ):
@@ -275,8 +277,11 @@ class ArbScanner:
             # Alert only when it clears the user's thresholds AND it's materially
             # different from what we last alerted for this window — so the same
             # arb just sitting there (or flickering) doesn't spam.
+            # min_arb_pct is checked against the REALISTIC blended edge
+            # (net_profit_pct = profit/size at the fillable depth), so a high
+            # top-of-book peak no longer sneaks a thin arb past the filter.
             meets = (
-                opp.net_pct_top >= s["min_arb_pct"]
+                opp.net_profit_pct >= s["min_arb_pct"]
                 and opp.max_profit_usd >= s["min_profit_usd"]
                 and opp.max_wager_usd >= s["min_wager_usd"]
             )
