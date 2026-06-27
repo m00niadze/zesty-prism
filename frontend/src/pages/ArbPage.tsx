@@ -23,7 +23,7 @@ export default function ArbPage() {
   };
 
   const liveCount = data.filter((o) => o.is_live).length;
-  const bestPct = data.length > 0 ? Math.max(...data.map((o) => o.net_pct_top)) : 0;
+  const bestPct = data.length > 0 ? Math.max(...data.map((o) => o.net_profit_pct)) : 0;
 
   return (
     <div className="space-y-6">

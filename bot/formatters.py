@@ -30,9 +30,13 @@ def fmt_arb_alert(
     if site_url and opp_id is not None:
         calc_line = f'📊 <a href="{site_url.rstrip("/")}/?opp={opp_id}">Open in calculator</a>\n'
 
-    edge = opp.get("net_pct_top", opp["net_profit_pct"])
+    top_pct = opp.get("net_pct_top", opp["net_profit_pct"])
     max_profit = opp.get("max_profit_usd", opp["net_profit_usd"])
     max_wager = opp.get("max_wager_usd", opp["notional_usd"])
+    # Realistic edge = profit across the WHOLE fillable size (what you actually get
+    # when you buy it), not the top-of-book peak. net_pct_top is the best single
+    # share and is shown only as a secondary "first shares" figure.
+    blended_pct = (max_profit / max_wager * 100.0) if max_wager > 0 else top_pct
     tag = "⚡ <b>BIG ARB</b>" if max_profit >= 50 else "🚨 <b>ARB ALERT</b>"
     when = ""
     da = opp.get("detected_at")
@@ -48,9 +52,9 @@ def fmt_arb_alert(
         f"<b>Strategy:</b> {strategy_label}\n"
         f"  Polymarket {opp['poly_side']}:  <code>${opp['poly_price']:.4f}</code>\n"
         f"  Predict.fun {opp['pf_side']}:  <code>${opp['pf_price']:.4f}</code>\n\n"
-        f"<b>Edge:</b> <code>{edge:.2f}%</code>   ·   "
+        f"<b>Edge:</b> <code>~{blended_pct:.2f}%</code> across <code>${max_wager:.0f}</code>"
+        f"  <i>(up to {top_pct:.2f}% on first shares)</i>\n"
         f"<b>Max profit:</b> <code>${max_profit:.2f}</code>\n"
-        f"<b>Size (depth):</b> up to <code>${max_wager:.0f}</code>\n"
         + (f"<i>⏱ detected {when} — arbs move fast, act now</i>\n" if when else "")
         + f"\n{calc_line}"
         + f'<a href="{poly_url}">Polymarket</a>  |  <a href="{pf_url}">Predict.fun</a>'
@@ -126,13 +130,16 @@ def fmt_arb_list(opps: list[dict], min_pct: float = 3.0, min_usd: float = 5.0, s
         )
         age = _age_str(o.get("detected_at"))
         age_suffix = f"  ·  {age}" if age else ""
+        mp = o.get("max_profit_usd", 0) or 0
+        mw = o.get("max_wager_usd", 0) or 0
+        top = o.get("net_pct_top", 0) or 0
+        blended = (mp / mw * 100.0) if mw > 0 else top
         lines.append(
             f"\n{i}. <b>{title}</b>\n"
             f"   Buy <b>{poly_side}</b> on Polymarket  @ <code>${o['poly_price']:.4f}</code>\n"
             f"   Buy <b>{pf_side}</b> on Predict.fun @ <code>${o['pf_price']:.4f}</code>\n"
-            f"   Arb: <code>{o.get('net_pct_top', 0):.2f}%</code>  ·  "
-            f"max profit <code>${o.get('max_profit_usd', 0):.2f}</code> "
-            f"on <code>${o.get('max_wager_usd', 0):.0f}</code>{age_suffix}\n"
+            f"   Arb: <code>~{blended:.2f}%</code> <i>(up to {top:.2f}%)</i>  ·  "
+            f"max profit <code>${mp:.2f}</code> on <code>${mw:.0f}</code>{age_suffix}\n"
             f"{calc}"
             f"   <a href=\"{poly_url}\">Polymarket</a>  |  <a href=\"{pf_url}\">Predict.fun</a>"
         )

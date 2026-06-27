@@ -7,7 +7,7 @@ interface Props {
   onSelect?: (o: ArbOpportunity) => void;
 }
 
-type SortKey = "net_pct_top" | "max_profit_usd" | "max_wager_usd";
+type SortKey = "net_profit_pct" | "max_profit_usd" | "max_wager_usd";
 
 function profitColor(pct: number) {
   if (pct >= 2) return "text-emerald-400";
@@ -70,7 +70,7 @@ export default function OpportunityTable({ opportunities, selectedId, onSelect }
             <th className="px-4 py-3 font-medium">Strategy</th>
             <th className="px-4 py-3 font-medium text-right">PM Avg</th>
             <th className="px-4 py-3 font-medium text-right">PF Avg</th>
-            {sortableTh("net_pct_top", "Best ROI")}
+            {sortableTh("net_profit_pct", "ROI (at size)")}
             {sortableTh("max_profit_usd", "Max Profit")}
             {sortableTh("max_wager_usd", "Max Size")}
           </tr>
@@ -80,7 +80,7 @@ export default function OpportunityTable({ opportunities, selectedId, onSelect }
             <tr
               key={o.id}
               onClick={() => onSelect?.(o)}
-              className={`cursor-pointer border-t ${rowBg(o.net_pct_top, o.id === selectedId)} hover:bg-gray-800/60 transition-colors`}
+              className={`cursor-pointer border-t ${rowBg(o.net_profit_pct, o.id === selectedId)} hover:bg-gray-800/60 transition-colors`}
             >
               <td className="px-4 py-3 max-w-xs">
                 <div className="truncate font-medium text-white" title={o.poly_title}>
@@ -130,9 +130,9 @@ export default function OpportunityTable({ opportunities, selectedId, onSelect }
               <td className="px-4 py-3 text-right font-mono text-gray-300">
                 ${o.pf_price.toFixed(4)}
               </td>
-              <td className={`px-4 py-3 text-right font-mono font-bold ${profitColor(o.net_pct_top)}`}>
-                {o.net_pct_top.toFixed(2)}%
-                <div className="text-[10px] font-normal text-gray-500">@max {o.net_profit_pct.toFixed(2)}%</div>
+              <td className={`px-4 py-3 text-right font-mono font-bold ${profitColor(o.net_profit_pct)}`}>
+                {o.net_profit_pct.toFixed(2)}%
+                <div className="text-[10px] font-normal text-gray-500">up to {o.net_pct_top.toFixed(2)}%</div>
               </td>
               <td className="px-4 py-3 text-right font-mono font-bold text-emerald-400">
                 ${o.max_profit_usd.toFixed(2)}
