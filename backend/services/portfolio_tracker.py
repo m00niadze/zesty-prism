@@ -61,10 +61,14 @@ class PortfolioTracker:
         # through the sales log so partial sells are itemized and the cost basis
         # stays put when shares leave the wallet; everything else keeps the simple
         # wallet-mirror behaviour (size follows the wallet, sold ⇒ drops off).
+        # A Poly leg counts as an arb leg while its PF partner is still being
+        # tracked — open OR already sold (a half-/fully-closed arb). Using 'open'
+        # only would drop a Poly leg to 'closed' (and out of every view) if you
+        # sold the PF leg FIRST and the Poly leg second.
         async with self._db.execute(
             """SELECT DISTINCT mm.poly_condition_id AS mid FROM matched_markets mm
                JOIN positions pf ON pf.market_id=mm.pf_market_id
-                    AND pf.platform='predictfun' AND pf.status='open'"""
+                    AND pf.platform='predictfun' AND pf.status IN ('open','sold')"""
         ) as cur:
             arb_mids = {r["mid"] for r in await cur.fetchall()}
 
