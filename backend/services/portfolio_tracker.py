@@ -650,10 +650,13 @@ class PortfolioTracker:
         pf_best_ask = pf_book["asks"][0][0] if pf_book["asks"] else 0.0
         pf_best_bid = pf_bids[0][0] if pf_bids else 0.0
 
-        poly_shares = poly_pos["size"] or 0.0
-        pf_shares = pf_pos["size"] or 0.0
-        poly_cost = poly_pos["cost_usd"] or 0.0
-        pf_cost = pf_pos["cost_usd"] or 0.0
+        # The exit applies to what's STILL HELD (size − already-sold), with the
+        # cost basis prorated to those open shares — otherwise a partly-sold pair
+        # is shown as if you can still sell the shares you already sold.
+        poly_shares = (poly_pos["size"] or 0.0) - (poly_pos.get("sold_shares") or 0.0)
+        pf_shares = (pf_pos["size"] or 0.0) - (pf_pos.get("sold_shares") or 0.0)
+        poly_cost = _open_cost(poly_pos, poly_shares)
+        pf_cost = _open_cost(pf_pos, pf_shares)
         paid = poly_cost + pf_cost
         poly_rate = mm["poly_fee_rate"] or 0.0
         pf_rate = await self._pf_fee_rate(mm["id"])
@@ -668,11 +671,10 @@ class PortfolioTracker:
         combined = _combined_leg(poly_leg, pf_leg)
         matched = min(poly_shares, pf_shares) or 1.0
 
-        # Hedge status uses OPEN shares (size − sold), so a partly-sold leg is
-        # judged on what's still held — consistent with the position row/summary.
-        # bought_at stays the true avg entry (cost / size).
-        poly_open = poly_shares - (poly_pos.get("sold_shares") or 0.0)
-        pf_open = pf_shares - (pf_pos.get("sold_shares") or 0.0)
+        # poly_shares/pf_shares are already the OPEN (still-held) shares, so the
+        # hedge status is judged on what's still held — consistent with the row.
+        poly_open = poly_shares
+        pf_open = pf_shares
         poly_avg = (poly_cost / poly_shares) if poly_shares > 0 else (poly_pos.get("avg_entry_price") or 0.0)
         pf_avg = (pf_cost / pf_shares) if pf_shares > 0 else (pf_pos.get("avg_entry_price") or 0.0)
         imbalance = abs(poly_open - pf_open)
